@@ -233,8 +233,19 @@ impl<TP: PixelType> TryFrom<&mut DynamicImageChannel> for &mut ImageChannel<TP> 
 
 impl<TP: PixelType> From<ImageChannel<TP>> for DynamicImageChannel {
     fn from(value: ImageChannel<TP>) -> Self {
-        let flat_channel: ImageChannel<DynamicSize<TP::Primitive>> = ImageChannel(value.0);
-        <TP::Primitive as PixelTypePrimitive>::into_runtime_channel(flat_channel)
+        ImageChannel::<DynamicSize<TP::Primitive>>::from(value).into()
+    }
+}
+
+impl<TP: PixelTypePrimitive> From<ImageChannel<DynamicSize<TP>>> for DynamicImageChannel {
+    fn from(value: ImageChannel<DynamicSize<TP>>) -> Self {
+        TP::into_runtime_channel(value)
+    }
+}
+
+impl<TP: PixelType> From<ImageChannel<TP>> for ImageChannel<DynamicSize<TP::Primitive>> {
+    fn from(value: ImageChannel<TP>) -> Self {
+        ImageChannel(value.0)
     }
 }
 
