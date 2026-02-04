@@ -35,6 +35,51 @@ impl DynamicImage {
         &self.channels[self.channels.len() - 1]
     }
 
+    pub fn first_with_rest_ref_mapped<'a, T: 'a, TF>(
+        &'a self,
+        mapper: TF,
+    ) -> (
+        T,
+        std::iter::Map<std::slice::Iter<'a, DynamicImageChannel>, TF>,
+    )
+    where
+        TF: FnMut(&'a DynamicImageChannel) -> T,
+    {
+        let mut iter = self.iter().map(mapper);
+        let first = iter.next().expect("Always has a image");
+        (first, iter)
+    }
+
+    pub fn first_with_rest_mut_mapped<'a, T: 'a, TF>(
+        &'a mut self,
+        mapper: TF,
+    ) -> (
+        T,
+        std::iter::Map<std::slice::IterMut<'a, DynamicImageChannel>, TF>,
+    )
+    where
+        TF: FnMut(&'a mut DynamicImageChannel) -> T,
+    {
+        let mut iter = self.iter_mut().map(mapper);
+        let first = iter.next().expect("Always has a image");
+        (first, iter)
+    }
+
+    pub fn first_with_rest_mapped<T, TF>(
+        self,
+        mapper: TF,
+    ) -> (
+        T,
+        std::iter::Map<std::vec::IntoIter<DynamicImageChannel>, TF>,
+    )
+    where
+        TF: FnMut(DynamicImageChannel) -> T,
+    {
+        let mut iter = self.into_iter().map(mapper);
+        let first = iter.next().expect("Always has a image");
+        (first, iter)
+    }
+
     #[must_use]
     #[allow(clippy::missing_panics_doc)]
     pub fn len(&self) -> NonZeroUsize {
@@ -310,6 +355,34 @@ mod tests {
     use std::num::NonZeroU32;
 
     use super::*;
+
+    #[test]
+    fn first_mapped_returns_ref() {
+        let ch = Image::<u8, 3>::new_vec(vec![1, 2, 3], NonZeroU32::MIN, NonZeroU32::MIN);
+        let dynamic = DynamicImage::from(ch);
+        let (first, mut rest) = dynamic.first_with_rest_ref_mapped(|x| match x {
+            DynamicImageChannel::U8(image_channel) => image_channel.buffer_flat_bytes(),
+            DynamicImageChannel::U16(image_channel) => image_channel.buffer_flat_bytes(),
+            DynamicImageChannel::F32(image_channel) => image_channel.buffer_flat_bytes(),
+        });
+        assert_eq!(1, first[0]);
+        assert_eq!(2, rest.next().unwrap()[0]);
+        assert_eq!(3, rest.next().unwrap()[0]);
+    }
+
+    #[test]
+    fn first_mapped_returns_mut() {
+        let ch = Image::<u8, 3>::new_vec(vec![1, 2, 3], NonZeroU32::MIN, NonZeroU32::MIN);
+        let mut dynamic = DynamicImage::from(ch);
+        let (first, mut rest) = dynamic.first_with_rest_mut_mapped(|x| match x {
+            DynamicImageChannel::U8(image_channel) => image_channel.buffer_flat_bytes(),
+            DynamicImageChannel::U16(image_channel) => image_channel.buffer_flat_bytes(),
+            DynamicImageChannel::F32(image_channel) => image_channel.buffer_flat_bytes(),
+        });
+        assert_eq!(1, first[0]);
+        assert_eq!(2, rest.next().unwrap()[0]);
+        assert_eq!(3, rest.next().unwrap()[0]);
+    }
 
     #[test]
     fn borrow_from_mut_dynamic_image() {

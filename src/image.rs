@@ -203,6 +203,12 @@ impl<T: BorrowableImageChannel, const CHANNELS: usize> ImageChannels<[T; CHANNEL
         // CHANNELS is always > 0
         self.0[0].borrow().dimensions()
     }
+
+    #[must_use]
+    pub fn dimensions_zeroable(&self) -> (u32, u32) {
+        self.0[0].borrow().dimensions_zeroable()
+    }
+
     /// Returns the number of pixels in each image channel
     #[must_use]
     pub fn len_per_channel(&self) -> usize {

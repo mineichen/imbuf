@@ -321,6 +321,10 @@ impl<TP: RuntimePixelType> ImageChannel<TP> {
         (self.0.width, self.0.height)
     }
 
+    pub const fn dimensions_zeroable(&self) -> (u32, u32) {
+        (self.0.width.get(), self.0.height.get())
+    }
+
     #[must_use]
     pub const fn pixel_elements(&self) -> NonZeroU8 {
         self.0.pixel_elements
