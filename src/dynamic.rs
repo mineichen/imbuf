@@ -35,6 +35,22 @@ impl DynamicImage {
         &self.channels[self.channels.len() - 1]
     }
 
+    /// Checkes, if all channels have the same width, height, pixel_elements and pixel_kind
+    pub fn is_uniform(&self) -> bool {
+        let (first, mut rest) = self.first_with_rest_ref_mapped(|x| {
+            (
+                match x {
+                    DynamicImageChannel::U8(_) => 0,
+                    DynamicImageChannel::U16(_) => 1,
+                    DynamicImageChannel::F32(_) => 2,
+                },
+                x.pixel_elements(),
+                x.dimensions(),
+            )
+        });
+        rest.all(|x| x == first)
+    }
+
     pub fn first_with_rest_ref_mapped<'a, T: 'a, TF>(
         &'a self,
         mapper: TF,
@@ -355,6 +371,29 @@ mod tests {
     use std::num::NonZeroU32;
 
     use super::*;
+
+    #[test]
+    fn image_with_other_dimensions_is_not_uniform() {
+        let ch1 = ImageChannel::<u8>::new_vec(
+            vec![1, 1],
+            NonZeroU32::MIN,
+            const { NonZeroU32::new(2).unwrap() },
+        );
+        let ch2 = ImageChannel::<u8>::new_vec(vec![1], NonZeroU32::MIN, NonZeroU32::MIN);
+        let dynamic = DynamicImage::from_channels(ch1.into(), [ch2.into()]);
+        assert!(!dynamic.is_uniform());
+    }
+
+    #[test]
+    fn image_as_dynamic_is_uniform() {
+        let image = Image::<u8, 3>::new_vec(
+            vec![0, 1, 2, 3, 4, 5],
+            NonZeroU32::MIN,
+            const { NonZeroU32::new(2).unwrap() },
+        );
+        let dynamic = DynamicImage::from(image);
+        assert!(dynamic.is_uniform());
+    }
 
     #[test]
     fn first_mapped_returns_ref() {
