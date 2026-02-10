@@ -8,7 +8,10 @@
 - Add `Image`, `ImageRef` and `ImageMut` typedefs to `ImageChannels`
 - Add image_0_25::DynamicRefImage0_25, which implements `TryFrom<Image<T,N>>`
 - Implement `DynamicRefImage0_25::write_to` to encode a image
-- Add `DynamicImage::len`, which returns a `NonZeroUsize` instead of `slice::usize`
+- Add `DynamicImage::len_nonzero`, which returns a `NonZeroUsize`
+- Add `DynamicImage::is_uniform`, which returns true if all dimensions (width, height, pixel_elements) and datatype are equal
+- Add `DynamicImage::first_with_rest_{''|mut|ref}_mapped` to get channels without unwrapping first
+- Add Into-Impls for all steps between `ImageChannel` -> `ImageChannel<DynamicSize<_>>` -> `DynamicImageChannel`
 
 # 0.2.0
 
