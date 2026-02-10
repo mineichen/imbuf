@@ -244,6 +244,11 @@ where
         let channel = ImageChannel::new_arc(input, width, height);
         Self([channel])
     }
+
+    #[must_use]
+    pub fn from_channel(ch: ImageChannel<T>) -> Self {
+        Self([ch])
+    }
 }
 
 impl<T: BorrowableImageChannel> ImageChannels<[T; 1]> {

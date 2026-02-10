@@ -1,3 +1,8 @@
+# 0.3.1
+
+- Impement `TryFrom<ImageChannel<DynamicSize<T>> for ImageChannel<T::Primitive>`
+- Implement `Image<T, 1>::from_channel(ch: ImageChannel<T>) -> Self`
+
 # 0.3.0
 
 - Allow trying to cast `DynamicImageChannel<DynamicSize<T>>` to `DynamicImageChannel<T>`
