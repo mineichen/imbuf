@@ -10,7 +10,7 @@
 - Implement `DynamicRefImage0_25::write_to` to encode a image
 - Add `DynamicImage::len_nonzero`, which returns a `NonZeroUsize`
 - Add `DynamicImage::is_uniform`, which returns true if all dimensions (width, height, pixel_elements) and datatype are equal
-- Add `DynamicImage::first_with_rest_{''|mut|ref}_mapped` to get channels without unwrapping first
+- Add `DynamicImage::mapped_channels`,`DynamicImage::mapped_channels_mut` and `DynamicImage::into_mapped_channels` to get channels without unwrapping the first from a iterator
 - Add Into-Impls for all steps between `ImageChannel` -> `ImageChannel<DynamicSize<_>>` -> `DynamicImageChannel`
 
 # 0.2.0

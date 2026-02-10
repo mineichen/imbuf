@@ -37,7 +37,7 @@ impl DynamicImage {
 
     /// Checkes, if all channels have the same width, height, pixel_elements and pixel_kind
     pub fn is_uniform(&self) -> bool {
-        let (first, mut rest) = self.first_with_rest_ref_mapped(|x| {
+        let (first, mut rest) = self.mapped_channels(|x| {
             (
                 match x {
                     DynamicImageChannel::U8(_) => 0,
@@ -51,7 +51,7 @@ impl DynamicImage {
         rest.all(|x| x == first)
     }
 
-    pub fn first_with_rest_ref_mapped<'a, T: 'a, TF>(
+    pub fn mapped_channels<'a, T: 'a, TF>(
         &'a self,
         mapper: TF,
     ) -> (
@@ -66,7 +66,7 @@ impl DynamicImage {
         (first, iter)
     }
 
-    pub fn first_with_rest_mut_mapped<'a, T: 'a, TF>(
+    pub fn mapped_channels_mut<'a, T: 'a, TF>(
         &'a mut self,
         mapper: TF,
     ) -> (
@@ -81,7 +81,7 @@ impl DynamicImage {
         (first, iter)
     }
 
-    pub fn first_with_rest_mapped<T, TF>(
+    pub fn into_mapped_channels<T, TF>(
         self,
         mapper: TF,
     ) -> (
@@ -399,7 +399,7 @@ mod tests {
     fn first_mapped_returns_ref() {
         let ch = Image::<u8, 3>::new_vec(vec![1, 2, 3], NonZeroU32::MIN, NonZeroU32::MIN);
         let dynamic = DynamicImage::from(ch);
-        let (first, mut rest) = dynamic.first_with_rest_ref_mapped(|x| match x {
+        let (first, mut rest) = dynamic.mapped_channels(|x| match x {
             DynamicImageChannel::U8(image_channel) => image_channel.buffer_flat_bytes(),
             DynamicImageChannel::U16(image_channel) => image_channel.buffer_flat_bytes(),
             DynamicImageChannel::F32(image_channel) => image_channel.buffer_flat_bytes(),
@@ -413,7 +413,7 @@ mod tests {
     fn first_mapped_returns_mut() {
         let ch = Image::<u8, 3>::new_vec(vec![1, 2, 3], NonZeroU32::MIN, NonZeroU32::MIN);
         let mut dynamic = DynamicImage::from(ch);
-        let (first, mut rest) = dynamic.first_with_rest_mut_mapped(|x| match x {
+        let (first, mut rest) = dynamic.mapped_channels_mut(|x| match x {
             DynamicImageChannel::U8(image_channel) => image_channel.buffer_flat_bytes(),
             DynamicImageChannel::U16(image_channel) => image_channel.buffer_flat_bytes(),
             DynamicImageChannel::F32(image_channel) => image_channel.buffer_flat_bytes(),
