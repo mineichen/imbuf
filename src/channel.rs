@@ -199,6 +199,20 @@ impl<TP: PixelType> TryFrom<DynamicImageChannel> for ImageChannel<TP> {
     }
 }
 
+impl<TP: PixelType> TryFrom<ImageChannel<DynamicSize<TP::Primitive>>> for ImageChannel<TP> {
+    type Error = DynamicImageChannel;
+
+    fn try_from(value: ImageChannel<DynamicSize<TP::Primitive>>) -> Result<Self, Self::Error> {
+        if value.pixel_elements() == TP::ELEMENTS {
+            Ok(ImageChannel(value.0))
+        } else {
+            Err(<TP::Primitive as PixelTypePrimitive>::into_runtime_channel(
+                value.into(),
+            ))
+        }
+    }
+}
+
 impl<TP: PixelType> TryFrom<&DynamicImageChannel> for &ImageChannel<TP> {
     type Error = ();
 
@@ -215,6 +229,18 @@ impl<TP: PixelType> TryFrom<&DynamicImageChannel> for &ImageChannel<TP> {
     }
 }
 
+impl<TP: PixelType> TryFrom<&ImageChannel<DynamicSize<TP::Primitive>>> for &ImageChannel<TP> {
+    type Error = ();
+
+    fn try_from(value: &ImageChannel<DynamicSize<TP::Primitive>>) -> Result<Self, Self::Error> {
+        if value.pixel_elements() == TP::ELEMENTS {
+            Ok(unsafe { std::mem::transmute(value) })
+        } else {
+            Err(())
+        }
+    }
+}
+
 impl<TP: PixelType> TryFrom<&mut DynamicImageChannel> for &mut ImageChannel<TP> {
     type Error = ();
 
@@ -225,6 +251,20 @@ impl<TP: PixelType> TryFrom<&mut DynamicImageChannel> for &mut ImageChannel<TP> 
         if typed.0.pixel_elements == TP::ELEMENTS {
             // Safety: ImageChannel is repr(transparent), so we are allowed to transmute between them
             Ok(unsafe { std::mem::transmute(&mut typed.0) })
+        } else {
+            Err(())
+        }
+    }
+}
+
+impl<TP: PixelType> TryFrom<&mut ImageChannel<DynamicSize<TP::Primitive>>>
+    for &mut ImageChannel<TP>
+{
+    type Error = ();
+
+    fn try_from(value: &mut ImageChannel<DynamicSize<TP::Primitive>>) -> Result<Self, Self::Error> {
+        if value.pixel_elements() == TP::ELEMENTS {
+            Ok(unsafe { std::mem::transmute(value) })
         } else {
             Err(())
         }
@@ -458,6 +498,22 @@ mod tests {
     use crate::{DynamicImage, Image};
 
     use super::*;
+
+    #[test]
+    fn try_from_dynamic_size_channel() {
+        let size = NonZeroU32::MIN;
+        let data = vec![[1u8, 2, 3]];
+        let ch = ImageChannel::<[u8; 3]>::new_vec(data, size, size);
+        let image: Image<[u8; 3], 1> = [ch].try_into().unwrap();
+        let dyn_image: DynamicImage = image.into();
+        let (restored_channel, mut rest) = dyn_image.into_mapped_channels(|x| match x {
+            DynamicImageChannel::U8(x) => ImageChannel::<[u8; 3]>::try_from(x).unwrap(),
+            _ => unreachable!(),
+        });
+        assert_eq!(None, rest.next());
+        assert_eq!(restored_channel.buffer(), &[[1u8, 2, 3]]);
+        Image::<[u8; 3], 1>::try_from([restored_channel]).unwrap();
+    }
 
     #[test]
     fn try_cast_dynamic_size_channel() {
