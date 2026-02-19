@@ -1,3 +1,6 @@
+# 0.3.2
+- Fix build with the image_0_25 feature
+
 # 0.3.1
 
 - Impement `TryFrom<ImageChannel<DynamicSize<T>> for ImageChannel<T::Primitive>`

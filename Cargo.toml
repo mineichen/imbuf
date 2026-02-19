@@ -1,6 +1,6 @@
 [package]
 name = "imbuf"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 authors = ["mineichen"]
 description = "Image buffers that abstract over underlying storage (Vec, Arc, or custom backends). Features copy-on-write semantics for efficient memory usage."

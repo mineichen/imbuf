@@ -1,4 +1,4 @@
-use std::num::{NonZeroU8, NonZeroU32};
+use std::num::{NonZeroU32, NonZeroU8};
 
 use image_0_25::{DynamicImage, GenericImageView, ImageBuffer, Luma, LumaA, Rgb, Rgba};
 
@@ -80,9 +80,9 @@ impl<'a> TryFrom<&'a crate::DynamicImage> for DynamicRefImage0_25<'a> {
         let channel = value.first();
         let pixel_elements = channel.pixel_elements();
 
-        if value.len().get() != 1 {
+        if value.len() != 1 {
             return Err(IntoDynamicRefImage0_25Error::IncompatibleLayout {
-                channels: crate::unwrap_usize_to_nonzero_u8(value.len().get()),
+                channels: crate::unwrap_usize_to_nonzero_u8(value.len()),
                 pixel_elements,
             });
         }
@@ -153,7 +153,7 @@ impl<'a> TryFrom<&'a crate::DynamicImage> for DynamicRefImage0_25<'a> {
                 ))
             }
             (_, actual) => Err(IntoDynamicRefImage0_25Error::IncompatibleLayout {
-                channels: crate::unwrap_usize_to_nonzero_u8(value.len().get()),
+                channels: crate::unwrap_usize_to_nonzero_u8(value.len()),
                 pixel_elements: NonZeroU8::new(actual).unwrap(),
             }),
         }
