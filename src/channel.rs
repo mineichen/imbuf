@@ -372,6 +372,20 @@ impl<TP: RuntimePixelType> ImageChannel<TP> {
 }
 
 impl<T: PixelTypePrimitive> ImageChannel<DynamicSize<T>> {
+    pub fn new_vec_dynamic(
+        data: Vec<T>,
+        width: NonZeroU32,
+        height: NonZeroU32,
+        pixel_elements: NonZeroU8,
+    ) -> ImageChannel<DynamicSize<T>> {
+        Self(UnsafeImageChannel::new_vec(
+            data,
+            width,
+            height,
+            pixel_elements,
+        ))
+    }
+
     /// Try to view this dynamically-sized pixel channel as a statically-sized `TP` pixel channel.
     ///
     /// Returns `Some(&ImageChannel<TP>)` if the runtime `pixel_elements` matches `TP::ELEMENTS`,

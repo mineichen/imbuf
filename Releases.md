@@ -1,5 +1,8 @@
+# 0.3.3
+- Add `ImageChannel<DynamicSize<_>>::new_vec_dynamic`
+
 # 0.3.2
-- Fix build with the image_0_25 feature
+- Fix build with the `image_0_25` feature
 
 # 0.3.1
 
@@ -14,7 +17,7 @@
 - Implement `From<&mut DynamicImage> for ImageRef<&mut T, N>`
 - Change `Image` to a `ImageChannels` in order to support Images with shared or mutable `ImageChannel` (beside owned, which worked before)
 - Add `Image`, `ImageRef` and `ImageMut` typedefs to `ImageChannels`
-- Add image_0_25::DynamicRefImage0_25, which implements `TryFrom<Image<T,N>>`
+- Add `image_0_25::DynamicRefImage0_25`, which implements `TryFrom<Image<T,N>>`
 - Implement `DynamicRefImage0_25::write_to` to encode a image
 - Add `DynamicImage::len_nonzero`, which returns a `NonZeroUsize`
 - Add `DynamicImage::is_uniform`, which returns true if all dimensions (width, height, pixel_elements) and datatype are equal
