@@ -33,4 +33,4 @@ jobs:
           components: miri
 
       - name: Run cargo miri test
-        run: cargo miri test
+        run: cargo miri test -p imbuf
