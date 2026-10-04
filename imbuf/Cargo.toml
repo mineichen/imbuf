@@ -1,0 +1,20 @@
+[package]
+name = "imbuf"
+version = "0.3.3"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Image buffers that abstract over underlying storage (Vec, Arc, or custom backends). Features copy-on-write semantics for efficient memory usage."
+readme = "README.md"
+keywords = ["image", "buffer", "ffi", "copy-on-write"]
+categories = ["multimedia::images", "graphics", "computer-vision", "data-structures"]
+
+[dependencies]
+thiserror.workspace = true
+image_0_25 = { version = "0.25", default-features = false, package = "image", optional = true }
+
+[dev-dependencies]
+image_0_25 = { version = "0.25", default-features = false, package = "image", features = [
+  "png",
+]}

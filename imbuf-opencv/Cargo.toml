@@ -1,0 +1,20 @@
+[package]
+name = "imbuf-opencv"
+version = "0.1.0"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Zero-copy conversions between imbuf image buffers and OpenCV Mats."
+keywords = ["image", "opencv", "ffi", "copy-on-write"]
+categories = ["multimedia::images", "computer-vision"]
+
+[dependencies]
+imbuf.workspace = true
+log.workspace = true
+opencv = { version = "0.101", default-features = false }
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+opencv = { version = "0.101", default-features = false, features = ["clang-runtime", "imgcodecs"] }
+testresult.workspace = true

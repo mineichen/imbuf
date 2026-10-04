@@ -1,19 +1,19 @@
-[package]
-name = "imbuf"
-version = "0.3.3"
-edition = "2024"
+[workspace]
+resolver = "3"
+members = [
+  "imbuf",
+  "imbuf-opencv",
+]
+
+[workspace.package]
 authors = ["mineichen"]
-description = "Image buffers that abstract over underlying storage (Vec, Arc, or custom backends). Features copy-on-write semantics for efficient memory usage."
+edition = "2024"
 license = "MPL-2.0"
 repository = "https://github.com/mineichen/imbuf"
-readme = "README.md"
-keywords = ["image", "buffer", "ffi", "copy-on-write"]
-categories = ["multimedia::images", "graphics", "computer-vision", "data-structures"]
 
-[dependencies]
+[workspace.dependencies]
+imbuf = { path = "imbuf", version = "0.3.3" }
+imbuf-opencv = { path = "imbuf-opencv", version = "0.1.0" }
+log = "0.4"
+testresult = "0.4"
 thiserror = "2"
-image_0_25 = { version = "0.25", default-features = false, package = "image", optional = true }
-
-[dev-dependencies]
-image_0_25 = { version = "0.25", default-features = false, package = "image", features = ["png"] }
-
