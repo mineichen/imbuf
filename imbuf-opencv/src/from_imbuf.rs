@@ -1,67 +1,95 @@
-use std::ops::Deref;
+use imbuf::{DynamicImage, DynamicImageChannel, Image, ImageChannel, PixelType, RuntimePixelType};
+use opencv::boxed_ref::{BoxedRef, BoxedRefMut};
+use opencv::core::Mat;
 
-use imbuf::{DynamicImage, Image, ImageChannel, PixelType};
-use opencv::{boxed_ref::BoxedRef, core::Mat};
+/// Borrows an [`imbuf`] buffer as an OpenCV [`Mat`] without copying.
+///
+/// The returned `Mat` borrows the `imbuf` data for as long as the reference is
+/// held.
+pub trait ImbufToOpencv {
+    /// # Errors
+    /// Fails if the buffer layout cannot be represented as a `Mat`.
+    fn as_mat_ref(&self) -> opencv::Result<BoxedRef<'_, Mat>>;
 
-pub struct BorrowImage<'mat>(BoxedRef<'mat, Mat>);
-impl<'a> Deref for BorrowImage<'a> {
-    type Target = BoxedRef<'a, Mat>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
+    /// # Errors
+    /// Fails if the buffer layout cannot be represented as a `Mat`.
+    fn as_mat_mut(&mut self) -> opencv::Result<BoxedRefMut<'_, Mat>>;
 }
 
-impl<'mat, 'img: 'mat> TryFrom<&'img DynamicImage> for BorrowImage<'mat> {
-    type Error = opencv::Error;
+impl ImbufToOpencv for DynamicImage {
+    fn as_mat_ref(&self) -> opencv::Result<BoxedRef<'_, Mat>> {
+        if self.len() != 1 {
+            return Err(unsupported_layout());
+        }
+        match self.first() {
+            DynamicImageChannel::U8(c) => c.as_mat_ref(),
+            DynamicImageChannel::U16(c) => c.as_mat_ref(),
+            DynamicImageChannel::F32(c) => c.as_mat_ref(),
+        }
+    }
 
-    fn try_from(value: &'img DynamicImage) -> Result<Self, Self::Error> {
-        match (
-            value.len(),
-            value.first().pixel_elements().get(),
-            value.first(),
-        ) {
-            (1, 1, imbuf::DynamicImageChannel::U8(c)) => {
-                c.try_cast::<u8>().expect("Checked in match").try_into()
-            }
-            (1, 1, imbuf::DynamicImageChannel::U16(c)) => {
-                c.try_cast::<u16>().expect("Checked in match").try_into()
-            }
-            _ => Err(opencv::Error::new(
-                opencv::core::Code::StsUnsupportedFormat.into(),
-                "unsupported format",
-            )),
+    fn as_mat_mut(&mut self) -> opencv::Result<BoxedRefMut<'_, Mat>> {
+        if self.len() != 1 {
+            return Err(unsupported_layout());
+        }
+        match &mut self[0] {
+            DynamicImageChannel::U8(c) => c.as_mat_mut(),
+            DynamicImageChannel::U16(c) => c.as_mat_mut(),
+            DynamicImageChannel::F32(c) => c.as_mat_mut(),
         }
     }
 }
 
-impl<'mat, 'img: 'mat, T: PixelType + 'static + opencv::core::DataType>
-    TryFrom<&'img ImageChannel<T>> for BorrowImage<'mat>
+impl<TP> ImbufToOpencv for ImageChannel<TP>
+where
+    TP: RuntimePixelType,
+    TP::Primitive: opencv::core::DataType,
 {
-    type Error = opencv::Error;
+    fn as_mat_ref(&self) -> opencv::Result<BoxedRef<'_, Mat>> {
+        let (width, height) = self.dimensions();
+        Mat::new_rows_cols_with_data(
+            height.get().cast_signed(),
+            width.get().cast_signed(),
+            self.buffer_flat(),
+        )
+    }
 
-    fn try_from(img: &'img ImageChannel<T>) -> Result<Self, Self::Error> {
-        let (width, height) = img.dimensions();
-        Ok(BorrowImage(Mat::new_rows_cols_with_data(
-            height.get() as _,
-            width.get() as _,
-            img.buffer() as _,
-        )?))
+    fn as_mat_mut(&mut self) -> opencv::Result<BoxedRefMut<'_, Mat>> {
+        let (width, height) = self.dimensions();
+        Mat::new_rows_cols_with_data_mut(
+            height.get().cast_signed(),
+            width.get().cast_signed(),
+            self.primitive_make_mut(),
+        )
     }
 }
-impl<'mat, 'img: 'mat, T: PixelType + 'static + opencv::core::DataType> TryFrom<&'img Image<T, 1>>
-    for BorrowImage<'mat>
-{
-    type Error = opencv::Error;
 
-    fn try_from(img: &'img Image<T, 1>) -> Result<Self, Self::Error> {
-        let (width, height) = img.dimensions();
-        Ok(BorrowImage(Mat::new_rows_cols_with_data(
-            height.get() as _,
-            width.get() as _,
-            img.buffer() as _,
-        )?))
+impl<T: PixelType + opencv::core::DataType> ImbufToOpencv for Image<T, 1> {
+    fn as_mat_ref(&self) -> opencv::Result<BoxedRef<'_, Mat>> {
+        let (width, height) = self.dimensions();
+        Mat::new_rows_cols_with_data(
+            height.get().cast_signed(),
+            width.get().cast_signed(),
+            self.buffer(),
+        )
     }
+
+    fn as_mat_mut(&mut self) -> opencv::Result<BoxedRefMut<'_, Mat>> {
+        let (width, height) = self.dimensions();
+        let [buffer] = self.make_mut();
+        Mat::new_rows_cols_with_data_mut(
+            height.get().cast_signed(),
+            width.get().cast_signed(),
+            buffer,
+        )
+    }
+}
+
+fn unsupported_layout() -> opencv::Error {
+    opencv::Error::new(
+        opencv::core::Code::StsUnsupportedFormat.into(),
+        "unsupported format: expected a single U8, U16 or F32 channel",
+    )
 }
 
 #[cfg(test)]
@@ -69,12 +97,11 @@ mod tests {
     use std::num::NonZeroU32;
 
     use opencv::core::Vector;
-    use opencv::prelude::MatTraitConst;
-    use opencv::prelude::MatTraitConstManual;
+    use opencv::prelude::{MatTraitConst, MatTraitConstManual, MatTraitManual};
 
     use super::*;
 
-    fn imbuf_image_to_borrowed_mat_preserves_dims_and_content<T>(
+    fn imbuf_image_to_mat_preserves_dims_and_content<T>(
         pixels: Vec<T>,
         decode_png_to_vec: impl Fn(&[u8]) -> Vec<T>,
     ) where
@@ -84,8 +111,8 @@ mod tests {
         let height = NonZeroU32::new(2).unwrap();
         let img: Image<T, 1> = Image::new_vec(pixels, width, height);
 
-        let borrowed: BorrowImage<'_> = (&img).try_into().unwrap();
-        let mat = &*borrowed;
+        let borrowed = img.as_mat_ref().unwrap();
+        let mat = &borrowed;
 
         assert_eq!(img.width(), width);
         assert_eq!(img.height(), height);
@@ -105,8 +132,8 @@ mod tests {
     }
 
     #[test]
-    fn imbuf_image_u8_to_borrowed_mat_preserves_dims_and_content() {
-        imbuf_image_to_borrowed_mat_preserves_dims_and_content(vec![0u8, 1, 2, 3, 4, 5], |png| {
+    fn imbuf_image_u8_to_mat_preserves_dims_and_content() {
+        imbuf_image_to_mat_preserves_dims_and_content(vec![0u8, 1, 2, 3, 4, 5], |png| {
             match image::load_from_memory_with_format(png, image::ImageFormat::Png).unwrap() {
                 image::DynamicImage::ImageLuma8(img) => img.into_vec(),
                 other => panic!("Expected Luma8 PNG, got {other:?}"),
@@ -115,13 +142,28 @@ mod tests {
     }
 
     #[test]
-    fn imbuf_image_u16_to_borrowed_mat_preserves_dims_and_content() {
-        imbuf_image_to_borrowed_mat_preserves_dims_and_content(
-            vec![10u16, 20, 30, 40, 50, 60],
-            |png| match image::load_from_memory_with_format(png, image::ImageFormat::Png).unwrap() {
+    fn imbuf_image_u16_to_mat_preserves_dims_and_content() {
+        imbuf_image_to_mat_preserves_dims_and_content(vec![10u16, 20, 30, 40, 50, 60], |png| {
+            match image::load_from_memory_with_format(png, image::ImageFormat::Png).unwrap() {
                 image::DynamicImage::ImageLuma16(img) => img.into_vec(),
                 other => panic!("Expected Luma16 PNG, got {other:?}"),
-            },
-        );
+            }
+        });
+    }
+
+    #[test]
+    fn as_mat_mut_shares_buffer() {
+        let width = NonZeroU32::new(2).unwrap();
+        let height = NonZeroU32::new(1).unwrap();
+        let mut img: Image<u8, 1> = Image::new_vec(vec![1, 2], width, height);
+        let data_ptr = img.buffer().as_ptr() as usize;
+
+        {
+            let mut mat = img.as_mat_mut().unwrap();
+            mat.data_typed_mut::<u8>().unwrap()[0] = 42;
+        }
+
+        assert_eq!(img.buffer(), &[42, 2]);
+        assert_eq!(img.buffer().as_ptr() as usize, data_ptr);
     }
 }

@@ -1,3 +1,47 @@
+# Unreleased
+- Deprecate the `external` module (`image_0_25` integration). It now lives in the separate `imbuf-image` crate, which can be depended on directly.
+- The old API keeps working during migration.
+
+## Migration: `imbuf::external` -> `imbuf-image`
+
+Add the new crate (only the newest `imbuf` x `image` combination is released):
+
+```toml
+[dependencies]
+imbuf-image = "0.1"
+```
+
+Types were renamed and the conversions are now provided through extension
+traits, because a crate other than `imbuf` cannot write `From` / `TryFrom`
+impls between two foreign types (Rust orphan rules):
+
+| Old (deprecated in `imbuf::external`) | New (`imbuf_image`)           |
+| ------------------------------------- | ----------------------------- |
+| `DynamicRefImage0_25`                 | `DynamicRefImage`             |
+| `IntoDynamicImage0_25Error`           | `IntoDynamicImageError`       |
+| `IntoDynamicImage0_25ErrorReason`     | `IntoDynamicImageErrorReason` |
+| `IntoDynamicRefImage0_25Error`        | `IntoDynamicRefImageError`    |
+| `IncompatibleBufferSize`              | `IncompatibleBufferSize`      |
+
+Conversions:
+
+| Old                                            | New                                                   |
+| ---------------------------------------------- | ----------------------------------------------------- |
+| `DynamicRefImage0_25::from(&image)`            | `image.as_image_ref()` (via `ImbufToImage`)           |
+| `DynamicRefImage0_25::try_from(&dynamic)`      | `dynamic.as_image_ref()` (via `ImbufToImage`)         |
+| `image::DynamicImage::from(owned_image)`       | `owned_image.into_image()` (via `IntoImage`)          |
+| `imbuf::DynamicImage::try_from(image_dynamic)` | `image_dynamic.into_dyn_imbuf()` (via `ImageToImbuf`) |
+
+Remember to bring the traits into scope:
+
+```rust
+use imbuf_image::{ImbufToImage, ImageToImbuf, IntoImage};
+```
+
+If you need a different `image` version, or one matching an older `imbuf`
+release, implement the same conversions yourself in your own crate. See the
+repository `README.md`.
+
 # 0.3.3
 - Add `ImageChannel<DynamicSize<_>>::new_vec_dynamic`
 

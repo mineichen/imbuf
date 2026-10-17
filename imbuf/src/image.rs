@@ -263,6 +263,15 @@ impl<T: BorrowableImageChannel> ImageChannels<[T; 1]> {
     }
 }
 
+impl<T> ImageChannels<[T; 1]>
+where
+    T: BorrowableImageChannel + std::borrow::BorrowMut<ImageChannel<T::Pixel>>,
+{
+    pub fn buffer_flat_mut(&mut self) -> &mut [<T::Pixel as RuntimePixelType>::Primitive] {
+        self.0[0].borrow_mut().primitive_make_mut()
+    }
+}
+
 impl<const PIXEL_ELEMENTS: usize, T: PixelTypePrimitive> Image<[T; PIXEL_ELEMENTS], 1> {
     #[must_use]
     pub fn from_planar_image<const CHANNELS: usize>(i: &Image<T, CHANNELS>) -> Self

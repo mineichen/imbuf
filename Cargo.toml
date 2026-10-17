@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
   "imbuf",
+  "imbuf-image",
   "imbuf-opencv",
 ]
 
@@ -13,6 +14,7 @@ repository = "https://github.com/mineichen/imbuf"
 
 [workspace.dependencies]
 imbuf = { path = "imbuf", version = "0.3.3" }
+imbuf-image = { path = "imbuf-image", version = "0.1.0" }
 imbuf-opencv = { path = "imbuf-opencv", version = "0.1.0" }
 log = "0.4"
 testresult = "0.4"

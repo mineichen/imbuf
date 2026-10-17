@@ -18,7 +18,7 @@ pub use dynamic::{DynamicImage, DynamicImageChannel, IncompatibleImageError};
 #[cfg(feature = "image_0_25")]
 pub use external::*;
 pub use image::{Image, ImageChannels, ImageMut, ImageRef};
-pub use pixel::{DynamicSize, PixelType, PixelTypePrimitive};
+pub use pixel::{DynamicSize, PixelType, PixelTypePrimitive, RuntimePixelType};
 
 #[deprecated(
     since = "0.3.0",

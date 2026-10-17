@@ -1,0 +1,19 @@
+[package]
+name = "imbuf-image"
+version = "0.1.0"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Conversions between imbuf image buffers and the `image` crate, without copying buffers."
+readme = "README.md"
+keywords = ["image", "buffer", "ffi", "copy-on-write"]
+categories = ["multimedia::images", "graphics", "data-structures"]
+
+[dependencies]
+imbuf.workspace = true
+thiserror.workspace = true
+image = { version = "0.25", default-features = false }
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }

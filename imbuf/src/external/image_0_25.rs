@@ -1,9 +1,15 @@
-use std::num::{NonZeroU32, NonZeroU8};
+#![allow(deprecated)] // This module is deprecated as a whole; its own impls still use it.
+
+use std::num::{NonZeroU8, NonZeroU32};
 
 use image_0_25::{DynamicImage, GenericImageView, ImageBuffer, Luma, LumaA, Rgb, Rgba};
 
 use crate::{DynamicImageChannel, Image, IncompatibleBufferSize};
 
+#[deprecated(
+    since = "0.3.4",
+    note = "Use the `imbuf-image` crate instead, e.g. `imbuf_image::IntoDynamicImageError`"
+)]
 #[derive(thiserror::Error, Debug)]
 #[error("Cannot convert {image:?} into DynamicImage: {reason}")]
 #[non_exhaustive]
@@ -12,6 +18,10 @@ pub struct IntoDynamicImage0_25Error {
     pub reason: IntoDynamicImage0_25ErrorReason,
 }
 
+#[deprecated(
+    since = "0.3.4",
+    note = "Use the `imbuf-image` crate instead, e.g. `imbuf_image::IntoDynamicImageErrorReason`"
+)]
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum IntoDynamicImage0_25ErrorReason {
@@ -25,6 +35,10 @@ pub enum IntoDynamicImage0_25ErrorReason {
     NonExhaustive,
 }
 
+#[deprecated(
+    since = "0.3.4",
+    note = "Use the `imbuf-image` crate instead, e.g. `imbuf_image::DynamicRefImage`"
+)]
 #[derive(Debug)]
 pub enum DynamicRefImage0_25<'a> {
     ImageLuma8(ImageBuffer<Luma<u8>, &'a [u8]>),
@@ -39,6 +53,10 @@ pub enum DynamicRefImage0_25<'a> {
     ImageRgba32F(ImageBuffer<Rgba<f32>, &'a [f32]>),
 }
 
+#[deprecated(
+    since = "0.3.4",
+    note = "Use the `imbuf-image` crate instead, e.g. `imbuf_image::IntoDynamicRefImageError`"
+)]
 #[derive(Debug, thiserror::Error)]
 pub enum IntoDynamicRefImage0_25Error {
     #[error(
