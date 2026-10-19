@@ -51,6 +51,7 @@ impl DynamicImage {
         rest.all(|x| x == first)
     }
 
+    #[allow(clippy::missing_panics_doc)]
     pub fn mapped_channels<'a, T: 'a, TF>(
         &'a self,
         mapper: TF,
@@ -66,6 +67,7 @@ impl DynamicImage {
         (first, iter)
     }
 
+    #[allow(clippy::missing_panics_doc)]
     pub fn mapped_channels_mut<'a, T: 'a, TF>(
         &'a mut self,
         mapper: TF,
@@ -81,6 +83,7 @@ impl DynamicImage {
         (first, iter)
     }
 
+    #[allow(clippy::missing_panics_doc)]
     pub fn into_mapped_channels<T, TF>(
         self,
         mapper: TF,
@@ -309,11 +312,11 @@ impl<'a, T: PixelType, const CHANNELS: usize> TryFrom<&'a DynamicImage>
                         actual: crate::unwrap_usize_to_nonzero_u8(i),
                     })
                 }
-            };
+            }
             MaybeUninit::uninit()
         });
         result
-            .and_then(|_| {
+            .and_then(|()| {
                 <ImageRef<'a, T, CHANNELS>>::try_from(channels.map(|x| unsafe { x.assume_init() }))
                     .map_err(|x: IncompatibleImageError<[&ImageChannel<T>; CHANNELS]>| x.reason)
             })
@@ -351,11 +354,11 @@ impl<'a, T: PixelType, const CHANNELS: usize> TryFrom<&'a mut DynamicImage>
                         actual: crate::unwrap_usize_to_nonzero_u8(i),
                     })
                 }
-            };
+            }
             MaybeUninit::uninit()
         });
         result
-            .and_then(|_| {
+            .and_then(|()| {
                 <ImageMut<'a, T, CHANNELS>>::try_from(channels.map(|x| unsafe { x.assume_init() }))
                     .map_err(|x: IncompatibleImageError<[&mut ImageChannel<T>; CHANNELS]>| x.reason)
             })
