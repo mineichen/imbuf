@@ -1,4 +1,4 @@
-use std::num::NonZeroU32;
+use std::num::{NonZeroU8, NonZeroU32};
 
 use imbuf::{DynamicImage, DynamicImageChannel, Image, ImageChannel, PixelType, RuntimePixelType};
 use opencv::boxed_ref::{BoxedRef, BoxedRefMut};
@@ -11,7 +11,7 @@ use opencv::core::{DataType, Mat};
 pub trait ImbufToOpencv {
     /// # Errors
     /// Fails if the buffer layout cannot be represented as a `Mat`.
-    fn as_mat_ref(&self) -> opencv::Result<BoxedRef<'_, Mat>>;
+    fn as_mat(&self) -> opencv::Result<BoxedRef<'_, Mat>>;
 
     /// # Errors
     /// Fails if the buffer layout cannot be represented as a `Mat`.
@@ -19,21 +19,17 @@ pub trait ImbufToOpencv {
 }
 
 impl ImbufToOpencv for DynamicImage {
-    fn as_mat_ref(&self) -> opencv::Result<BoxedRef<'_, Mat>> {
-        if self.len() != 1 {
-            return Err(unsupported_layout());
-        }
+    fn as_mat(&self) -> opencv::Result<BoxedRef<'_, Mat>> {
+        ensure_layout(self)?;
         match self.first() {
-            DynamicImageChannel::U8(c) => c.as_mat_ref(),
-            DynamicImageChannel::U16(c) => c.as_mat_ref(),
-            DynamicImageChannel::F32(c) => c.as_mat_ref(),
+            DynamicImageChannel::U8(c) => c.as_mat(),
+            DynamicImageChannel::U16(c) => c.as_mat(),
+            DynamicImageChannel::F32(c) => c.as_mat(),
         }
     }
 
     fn as_mat_mut(&mut self) -> opencv::Result<BoxedRefMut<'_, Mat>> {
-        if self.len() != 1 {
-            return Err(unsupported_layout());
-        }
+        ensure_layout(self)?;
         match &mut self[0] {
             DynamicImageChannel::U8(c) => c.as_mat_mut(),
             DynamicImageChannel::U16(c) => c.as_mat_mut(),
@@ -42,12 +38,23 @@ impl ImbufToOpencv for DynamicImage {
     }
 }
 
+fn ensure_layout(img: &DynamicImage) -> opencv::Result<()> {
+    if img.len() == 1 && img.first().pixel_elements() == NonZeroU8::MIN {
+        Ok(())
+    } else {
+        Err(opencv::Error::new(
+            opencv::core::Code::StsUnsupportedFormat.into(),
+            "unsupported format: expected a single U8, U16 or F32 channel",
+        ))
+    }
+}
+
 impl<TP> ImbufToOpencv for ImageChannel<TP>
 where
     TP: RuntimePixelType,
     TP::Primitive: DataType,
 {
-    fn as_mat_ref(&self) -> opencv::Result<BoxedRef<'_, Mat>> {
+    fn as_mat(&self) -> opencv::Result<BoxedRef<'_, Mat>> {
         let (width, height) = self.dimensions();
         Mat::new_rows_cols_with_data(
             height.get().cast_signed(),
@@ -71,7 +78,7 @@ where
     TP: PixelType,
     TP::Primitive: DataType,
 {
-    fn as_mat_ref(&self) -> opencv::Result<BoxedRef<'_, Mat>> {
+    fn as_mat(&self) -> opencv::Result<BoxedRef<'_, Mat>> {
         let dims = self.dimensions();
         let flat = self.buffer_flat();
         // Safety: Boxes the Mat into BoxedRef to restrict lifetime
@@ -134,13 +141,6 @@ where
     }
 }
 
-fn unsupported_layout() -> opencv::Error {
-    opencv::Error::new(
-        opencv::core::Code::StsUnsupportedFormat.into(),
-        "unsupported format: expected a single U8, U16 or F32 channel",
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
@@ -161,7 +161,7 @@ mod tests {
         let height = NonZeroU32::new(2).unwrap();
         let img: Image<T, 1> = Image::new_vec(pixels, width, height);
 
-        let borrowed = img.as_mat_ref().unwrap();
+        let borrowed = img.as_mat().unwrap();
         let mat = &borrowed;
 
         assert_eq!(img.width(), width);
@@ -224,7 +224,7 @@ mod tests {
         let img: Image<[u8; 3], 1> = Image::new_vec(vec![[1u8, 2, 3], [4, 5, 6]], width, height);
         let data_ptr = img.buffer().as_ptr() as usize;
 
-        let borrowed = img.as_mat_ref().unwrap();
+        let borrowed = img.as_mat().unwrap();
         let mat = &borrowed;
 
         assert_eq!(mat.rows(), 1);
@@ -266,7 +266,7 @@ mod tests {
         );
         let data_ptr = img.buffer().as_ptr() as usize;
 
-        let borrowed = img.as_mat_ref().unwrap();
+        let borrowed = img.as_mat().unwrap();
         let mat = &borrowed;
         assert_eq!(mat.rows(), 1);
         assert_eq!(mat.cols(), 2);

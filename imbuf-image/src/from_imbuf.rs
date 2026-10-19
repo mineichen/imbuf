@@ -101,7 +101,7 @@ pub enum IntoDynamicRefImageError {
 pub trait ImbufToImage {
     /// # Errors
     /// Fails if the buffer layout cannot be represented as an `image` type.
-    fn as_image_ref(&self) -> Result<DynamicRefImage<'_>, IntoDynamicRefImageError>;
+    fn as_image(&self) -> Result<DynamicRefImage<'_>, IntoDynamicRefImageError>;
 
     /// # Errors
     /// Fails if the buffer layout cannot be represented as an `image` type.
@@ -205,7 +205,7 @@ impl<'a> TryFrom<&'a imbuf::DynamicImage> for DynamicRefImage<'a> {
 }
 
 impl ImbufToImage for imbuf::DynamicImage {
-    fn as_image_ref(&self) -> Result<DynamicRefImage<'_>, IntoDynamicRefImageError> {
+    fn as_image(&self) -> Result<DynamicRefImage<'_>, IntoDynamicRefImageError> {
         DynamicRefImage::try_from(self)
     }
 
@@ -313,7 +313,7 @@ impl ImbufToImage for imbuf::DynamicImage {
 macro_rules! impl_imbuf_to_image {
     ($src:ty, $pixel:ty, $variant:ident) => {
         impl ImbufToImage for Image<$src, 1> {
-            fn as_image_ref(&self) -> Result<DynamicRefImage<'_>, IntoDynamicRefImageError> {
+            fn as_image(&self) -> Result<DynamicRefImage<'_>, IntoDynamicRefImageError> {
                 let (width, height) = self.dimensions();
                 Ok(DynamicRefImage::$variant(ref_image(
                     width.get(),
@@ -419,9 +419,9 @@ mod tests {
         let expected = expected.into_inner();
         let image = Image::<u8, 1>::new_vec(vec![1], NonZeroU32::MIN, NonZeroU32::MIN);
 
-        assert_eq!(expected, test_encode(image.as_image_ref().unwrap()));
+        assert_eq!(expected, test_encode(image.as_image().unwrap()));
         let dynamic = imbuf::DynamicImage::from(image);
-        assert_eq!(expected, test_encode(dynamic.as_image_ref().unwrap()));
+        assert_eq!(expected, test_encode(dynamic.as_image().unwrap()));
     }
 
     #[test]
@@ -436,16 +436,16 @@ mod tests {
         let image =
             Image::<[u16; 3], 1>::new_vec(vec![[0, 1, 2]], NonZeroU32::MIN, NonZeroU32::MIN);
 
-        assert_eq!(expected, test_encode(image.as_image_ref().unwrap()));
+        assert_eq!(expected, test_encode(image.as_image().unwrap()));
         let dynamic = imbuf::DynamicImage::from(image);
-        assert_eq!(expected, test_encode(dynamic.as_image_ref().unwrap()));
+        assert_eq!(expected, test_encode(dynamic.as_image().unwrap()));
     }
 
     #[test]
     fn into_image_round_trips() {
         let image = Image::<u8, 1>::new_vec(vec![1], NonZeroU32::MIN, NonZeroU32::MIN);
         assert_eq!(
-            test_encode(image.as_image_ref().unwrap()),
+            test_encode(image.as_image().unwrap()),
             test_encode_owned(image.into_image())
         );
     }
@@ -456,7 +456,7 @@ mod tests {
             Image::<u8, 1>::new_vec(vec![1, 2, 3], NonZeroU32::new(3).unwrap(), NonZeroU32::MIN);
         let data_ptr = img.buffer().as_ptr() as usize;
 
-        let borrowed = img.as_image_ref().unwrap();
+        let borrowed = img.as_image().unwrap();
         let DynamicRefImage::ImageLuma8(buffer) = borrowed else {
             panic!("Expected Luma8");
         };

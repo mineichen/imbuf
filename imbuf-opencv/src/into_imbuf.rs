@@ -476,7 +476,7 @@ mod tests {
         let mat = Mat::from_slice_2d(&[[1u16, 2], [3, 4]]).unwrap();
         let dynamic = mat.into_dyn_imbuf().unwrap();
 
-        let borrowed = dynamic.as_mat_ref().unwrap();
+        let borrowed = dynamic.as_mat().unwrap();
         let mat = &borrowed;
         assert_eq!(mat.rows(), 2);
         assert_eq!(mat.cols(), 2);
