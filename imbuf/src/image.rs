@@ -231,6 +231,18 @@ impl<T: BorrowableImageChannel, const CHANNELS: usize> ImageChannels<[T; CHANNEL
 
         uninit
     }
+
+    /// Borrows the single channel of a one-channel image.
+    #[must_use]
+    pub fn first(&self) -> &T {
+        &self.0[0]
+    }
+
+    /// Mutably borrows the single channel of a one-channel image.
+    #[must_use]
+    pub fn first_mut(&mut self) -> &mut T {
+        &mut self.0[0]
+    }
 }
 
 impl<T> Image<T, 1>
@@ -269,20 +281,6 @@ where
 {
     pub fn buffer_flat_mut(&mut self) -> &mut [<T::Pixel as RuntimePixelType>::Primitive] {
         self.0[0].borrow_mut().primitive_make_mut()
-    }
-}
-
-impl<TP: RuntimePixelType> ImageChannels<[ImageChannel<TP>; 1]> {
-    /// Borrows the single channel of a one-channel image.
-    #[must_use]
-    pub fn first(&self) -> &ImageChannel<TP> {
-        &self.0[0]
-    }
-
-    /// Mutably borrows the single channel of a one-channel image.
-    #[must_use]
-    pub fn first_mut(&mut self) -> &mut ImageChannel<TP> {
-        &mut self.0[0]
     }
 }
 
