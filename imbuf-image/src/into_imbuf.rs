@@ -155,11 +155,7 @@ where
     if actual != expected {
         return Err(IntoDynamicImageError {
             image: image.into(),
-            reason: IncompatibleBufferSize {
-                expected: width_times_height,
-                actual,
-            }
-            .into(),
+            reason: IncompatibleBufferSize { expected, actual }.into(),
         });
     }
     let vec = image.into_vec();

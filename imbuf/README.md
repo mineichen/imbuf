@@ -1,4 +1,4 @@
-[![CI](https://github.com/mineichen/image-buffer/actions/workflows/test.yml/badge.svg)](https://github.com/mineichen/image-buffer/actions/workflows/test.yml)
+[![CI](https://github.com/mineichen/imbuf/actions/workflows/test.yml/badge.svg)](https://github.com/mineichen/imbuf/actions/workflows/test.yml)
 
 # This crate provides flexible image buffers
 

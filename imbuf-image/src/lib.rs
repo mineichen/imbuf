@@ -1,14 +1,4 @@
-//! Conversions between [`imbuf`] buffers and the [`image`] crate.
-//!
-//! This crate is the standalone home of the `image` integration that used to
-//! live in `imbuf::external`. It depends on `imbuf` and provides the value types
-//! as well as the conversions connecting the two crates.
-//!
-//! Only the newest release of `imbuf` and the newest supported version of
-//! `image` are covered. If you need another combination (for example a different
-//! `image` version, or a version matching an older `imbuf` release), implement
-//! the same conversions yourself — this crate is the template. See the
-//! repository `README.md`.
+#![doc = include_str!("../README.md")]
 
 use std::num::NonZeroU8;
 

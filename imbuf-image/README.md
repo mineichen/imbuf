@@ -1,7 +1,13 @@
 # imbuf-image
 
 Conversions between [`imbuf`](https://crates.io/crates/imbuf) image buffers and
-the [`image`](https://crates.io/crates/image) crate, without copying buffers.
+the [`image`](https://crates.io/crates/image) crate, with zero-copy borrows and
+moves where possible.
+
+Borrowing conversions expose the `imbuf` allocation as a `DynamicRefImage` /
+`DynamicRefImageMut`. Owned imbuf-to-image conversions move uniquely owned
+buffers, but copy shared buffers. Converting an `image::DynamicImage` into
+`imbuf` copies, because `image` owns its allocation.
 
 
 ## Which versions are covered?

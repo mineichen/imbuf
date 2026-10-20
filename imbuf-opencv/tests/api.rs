@@ -1,7 +1,7 @@
 use std::num::NonZeroU32;
 
 use imbuf::{DynamicImage, DynamicImageChannel, Image};
-use imbuf_opencv::{ImbufAsMutOpencv, ImbufAsOpencv, OpencvIntoImbuf};
+use imbuf_opencv::{ImbufAsOpencv, ImbufAsOpencvMut, OpencvIntoImbuf};
 use opencv::core::{Mat, MatTraitConst, MatTraitConstManual, MatTraitManual};
 
 fn dims(width: u32, height: u32) -> (NonZeroU32, NonZeroU32) {

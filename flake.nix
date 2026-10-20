@@ -77,6 +77,7 @@
         } // opencvEnvVars // {
           LD_LIBRARY_PATH = "";
           RUSTFLAGS = rustRpathFlags;
+          RUSTDOCFLAGS = rustRpathFlags;
         });
 
         apps.miri = {

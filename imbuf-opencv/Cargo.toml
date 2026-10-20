@@ -3,9 +3,11 @@ name = "imbuf-opencv"
 version = "0.1.0"
 authors.workspace = true
 edition.workspace = true
+rust-version = "1.88"
 license.workspace = true
 repository.workspace = true
 description = "Zero-copy conversions between imbuf image buffers and OpenCV Mats."
+readme = "README.md"
 keywords = ["image", "opencv", "ffi", "copy-on-write"]
 categories = ["multimedia::images", "computer-vision"]
 

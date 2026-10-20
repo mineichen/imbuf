@@ -13,7 +13,7 @@ license = "MPL-2.0"
 repository = "https://github.com/mineichen/imbuf"
 
 [workspace.dependencies]
-imbuf = { path = "imbuf", version = "0.3.3" }
+imbuf = { path = "imbuf", version = "0.3.4" }
 imbuf-image = { path = "imbuf-image", version = "0.1.0" }
 imbuf-opencv = { path = "imbuf-opencv", version = "0.1.0" }
 log = "0.4"

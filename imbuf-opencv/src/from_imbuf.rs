@@ -21,7 +21,7 @@ pub trait ImbufAsOpencv {
     /// (for example a planar [`DynamicImage`] with more than one channel).
     fn as_opencv(&self) -> opencv::Result<BoxedRef<'_, Mat>>;
 }
-pub trait ImbufAsMutOpencv: ImbufAsOpencv {
+pub trait ImbufAsOpencvMut: ImbufAsOpencv {
     /// Mutably borrows the buffer as an OpenCV [`Mat`] view without copying.
     ///
     /// Writes through the returned `Mat` land in the `imbuf` buffer.
@@ -55,7 +55,7 @@ impl ImbufAsOpencv for DynamicImage {
         }
     }
 }
-impl ImbufAsMutOpencv for DynamicImage {
+impl ImbufAsOpencvMut for DynamicImage {
     fn as_opencv_mut(&mut self) -> opencv::Result<BoxedRefMut<'_, Mat>> {
         ensure_single_channel(self)?;
         match &mut self[0] {
@@ -83,7 +83,7 @@ where
         Ok(BoxedRef::from(mat))
     }
 }
-impl<TP: RuntimePixelType> ImbufAsMutOpencv for ImageChannel<TP>
+impl<TP: RuntimePixelType> ImbufAsOpencvMut for ImageChannel<TP>
 where
     TP::Primitive: DataType,
 {
@@ -113,7 +113,7 @@ where
         Ok(BoxedRef::from(mat))
     }
 }
-impl<TP: PixelType> ImbufAsMutOpencv for Image<TP, 1>
+impl<TP: PixelType> ImbufAsOpencvMut for Image<TP, 1>
 where
     TP::Primitive: DataType,
 {
@@ -139,9 +139,8 @@ unsafe fn create_unrestricted_mat<TP: RuntimePixelType>(
 where
     TP::Primitive: DataType,
 {
-    let expected = u64::from(height.get())
-        .strict_mul(u64::from(width.get()))
-        .strict_mul(u64::from(pixel_elements.get()));
+    let expected =
+        u64::from(height.get()) * u64::from(width.get()) * u64::from(pixel_elements.get());
 
     assert!(
         u64::try_from(len) == Ok(expected),

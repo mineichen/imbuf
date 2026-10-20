@@ -162,8 +162,10 @@ impl<'a> TryFrom<&'a mut imbuf::DynamicImage> for DynamicRefImageMut<'a> {
     }
 }
 
-/// Converts an owned [`imbuf`] image into an owned [`image::DynamicImage`]
-/// without copying. Local because both source and target are foreign types.
+/// Converts an owned [`imbuf`] image into an owned [`image::DynamicImage`].
+///
+/// Uniquely owned buffers are moved without copying; shared buffers are copied.
+/// Local because both source and target are foreign types.
 pub trait ImbufIntoRustImage {
     type Error;
     fn into_rust_image_dynamic(self) -> Result<image::DynamicImage, Self::Error>;
