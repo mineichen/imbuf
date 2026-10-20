@@ -1,7 +1,11 @@
 use std::{
+    any::{Any, type_name},
     borrow::Borrow,
+    cmp::PartialEq,
     fmt::{self, Debug, Formatter},
+    mem,
     num::{NonZeroU8, NonZeroU32},
+    ptr, slice,
     sync::Arc,
 };
 
@@ -44,7 +48,7 @@ impl<TP: RuntimePixelType> Clone for ImageChannel<TP> {
 impl<TP> PartialEq for ImageChannel<TP>
 where
     TP: RuntimePixelType,
-    TP::Primitive: std::cmp::PartialEq,
+    TP::Primitive: PartialEq,
 {
     fn eq(&self, other: &Self) -> bool {
         self.0.width == other.0.width
@@ -76,7 +80,7 @@ where
         let ptr = input.as_mut_ptr().cast::<TP::Primitive>();
         let len = len * TP::ELEMENTS.get() as usize;
         let cap = cap * TP::ELEMENTS.get() as usize;
-        std::mem::forget(input);
+        mem::forget(input);
 
         // Safety: TP::Primitive is expected to be an aligned fraction of TP
         let cast_input = unsafe { Vec::from_raw_parts(ptr, len, cap) };
@@ -95,7 +99,7 @@ where
         let len = len * TP::ELEMENTS.get() as usize;
 
         // Safety: TP::Primitive is expected to be an aligned fraction of TP
-        let cast_input = unsafe { Arc::from_raw(std::ptr::slice_from_raw_parts(ptr, len)) };
+        let cast_input = unsafe { Arc::from_raw(ptr::slice_from_raw_parts(ptr, len)) };
 
         Self(UnsafeImageChannel::new_arc(
             cast_input,
@@ -107,7 +111,7 @@ where
 
     #[must_use]
     pub const fn buffer(&self) -> &[TP] {
-        unsafe { std::slice::from_raw_parts(self.0.ptr.cast::<TP>(), self.len()) }
+        unsafe { slice::from_raw_parts(self.0.ptr.cast::<TP>(), self.len()) }
     }
 
     #[must_use]
@@ -121,7 +125,7 @@ where
             (self.0.vtable.make_mut)(&mut self.0);
             let len = self.len_flat();
             let len = len / TP::ELEMENTS.get() as usize;
-            std::slice::from_raw_parts_mut(self.0.ptr as *mut TP, len)
+            slice::from_raw_parts_mut(self.0.ptr as *mut TP, len)
         }
     }
 
@@ -133,15 +137,15 @@ where
         // Get Vec<TP::Primitive> using the base implementation
         let vec_drop: unsafe extern "C" fn(&mut UnsafeImageChannel<TP::Primitive>) =
             crate::vec::clear_vec_channel::<TP::Primitive>;
-        let mut vec = if std::ptr::fn_addr_eq(self.0.vtable.drop, vec_drop) {
+        let mut vec = if ptr::fn_addr_eq(self.0.vtable.drop, vec_drop) {
             let size = self.len_flat();
             let result =
                 unsafe { Vec::from_raw_parts(self.0.ptr.cast_mut(), size, self.0.data as usize) };
-            std::mem::forget(self);
+            mem::forget(self);
             result
         } else {
             let len = self.len_flat();
-            let buf = unsafe { std::slice::from_raw_parts(self.0.ptr, len) };
+            let buf = unsafe { slice::from_raw_parts(self.0.ptr, len) };
             buf.to_vec()
         };
 
@@ -149,7 +153,7 @@ where
         let ptr = vec.as_mut_ptr().cast::<TP>();
         let len = vec.len() / TP::ELEMENTS.get() as usize;
         let cap = vec.capacity() / TP::ELEMENTS.get() as usize;
-        std::mem::forget(vec);
+        mem::forget(vec);
 
         unsafe { Vec::from_raw_parts(ptr, len, cap) }
     }
@@ -222,7 +226,7 @@ impl<TP: PixelType> TryFrom<&DynamicImageChannel> for &ImageChannel<TP> {
 
         if typed.0.pixel_elements == TP::ELEMENTS {
             // Safety: ImageChannel is repr(transparent), so we are allowed to transmute between them
-            Ok(unsafe { std::mem::transmute(&typed.0) })
+            Ok(unsafe { mem::transmute(&typed.0) })
         } else {
             Err(())
         }
@@ -234,7 +238,7 @@ impl<TP: PixelType> TryFrom<&ImageChannel<DynamicSize<TP::Primitive>>> for &Imag
 
     fn try_from(value: &ImageChannel<DynamicSize<TP::Primitive>>) -> Result<Self, Self::Error> {
         if value.pixel_elements() == TP::ELEMENTS {
-            Ok(unsafe { std::mem::transmute(value) })
+            Ok(unsafe { mem::transmute(value) })
         } else {
             Err(())
         }
@@ -250,7 +254,7 @@ impl<TP: PixelType> TryFrom<&mut DynamicImageChannel> for &mut ImageChannel<TP> 
 
         if typed.0.pixel_elements == TP::ELEMENTS {
             // Safety: ImageChannel is repr(transparent), so we are allowed to transmute between them
-            Ok(unsafe { std::mem::transmute(&mut typed.0) })
+            Ok(unsafe { mem::transmute(&mut typed.0) })
         } else {
             Err(())
         }
@@ -264,7 +268,7 @@ impl<TP: PixelType> TryFrom<&mut ImageChannel<DynamicSize<TP::Primitive>>>
 
     fn try_from(value: &mut ImageChannel<DynamicSize<TP::Primitive>>) -> Result<Self, Self::Error> {
         if value.pixel_elements() == TP::ELEMENTS {
-            Ok(unsafe { std::mem::transmute(value) })
+            Ok(unsafe { mem::transmute(value) })
         } else {
             Err(())
         }
@@ -305,25 +309,20 @@ impl<TP: RuntimePixelType> ImageChannel<TP> {
     #[must_use]
     pub const fn buffer_flat(&self) -> &[TP::Primitive] {
         let len = self.len_flat();
-        unsafe { std::slice::from_raw_parts(self.0.ptr, len) }
+        unsafe { slice::from_raw_parts(self.0.ptr, len) }
     }
 
     #[must_use]
     pub const fn buffer_flat_bytes(&self) -> &[u8] {
         let len = self.len_flat();
-        unsafe {
-            std::slice::from_raw_parts(
-                self.0.ptr.cast(),
-                len * std::mem::size_of::<TP::Primitive>(),
-            )
-        }
+        unsafe { slice::from_raw_parts(self.0.ptr.cast(), len * mem::size_of::<TP::Primitive>()) }
     }
 
     pub fn primitive_make_mut(&mut self) -> &mut [TP::Primitive] {
         unsafe {
             (self.0.vtable.make_mut)(&mut self.0);
             let len = self.len_flat();
-            std::slice::from_raw_parts_mut(self.0.ptr.cast_mut(), len)
+            slice::from_raw_parts_mut(self.0.ptr.cast_mut(), len)
         }
     }
 
@@ -335,11 +334,11 @@ impl<TP: RuntimePixelType> ImageChannel<TP> {
         let vec_drop: unsafe extern "C" fn(&mut UnsafeImageChannel<TP::Primitive>) =
             crate::vec::clear_vec_channel::<TP::Primitive>;
         // Check if this is a Vec-backed channel
-        if std::ptr::fn_addr_eq(self.0.vtable.drop, vec_drop) {
+        if ptr::fn_addr_eq(self.0.vtable.drop, vec_drop) {
             let size = self.len_flat();
             let result =
                 unsafe { Vec::from_raw_parts(self.0.ptr.cast_mut(), size, self.0.data as usize) };
-            std::mem::forget(self);
+            mem::forget(self);
             result
         } else {
             self.buffer_flat().to_vec()
@@ -396,7 +395,7 @@ impl<T: PixelTypePrimitive> ImageChannel<DynamicSize<T>> {
             // Safety: `ImageChannel<...>` is a thin wrapper around `UnsafeImageChannel<T>`.
             // With `TP::Primitive = T`, the representation is identical; `pixel_elements` check
             // ensures the typed view is consistent.
-            Some(unsafe { &*(std::ptr::from_ref(self).cast::<ImageChannel<TP>>()) })
+            Some(unsafe { &*(ptr::from_ref(self).cast::<ImageChannel<TP>>()) })
         } else {
             None
         }
@@ -405,13 +404,13 @@ impl<T: PixelTypePrimitive> ImageChannel<DynamicSize<T>> {
 
 impl<TP: RuntimePixelType> Debug for ImageChannel<TP>
 where
-    TP::Primitive: std::any::Any,
+    TP::Primitive: Any,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("ImageChannel")
             .field("width", &self.0.width)
             .field("height", &self.0.height)
-            .field("pixel", &std::any::type_name::<TP::Primitive>())
+            .field("pixel", &type_name::<TP::Primitive>())
             .field("pixel_elements", &self.0.pixel_elements.get())
             .finish()
     }
@@ -467,7 +466,7 @@ impl<T: 'static> UnsafeImageChannel<T> {
     }
 
     pub(crate) const fn buffer_flat(&self) -> &[T] {
-        unsafe { std::slice::from_raw_parts(self.ptr, self.calc_len_flat()) }
+        unsafe { slice::from_raw_parts(self.ptr, self.calc_len_flat()) }
     }
 
     pub(crate) const fn calc_len_packed(&self) -> usize {

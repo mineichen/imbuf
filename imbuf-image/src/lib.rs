@@ -6,11 +6,8 @@ mod from_imbuf;
 mod into_imbuf;
 mod ref_image;
 
-pub use from_imbuf::{
-    ImbufAsRustImage, ImbufAsRustImageMut, ImbufIntoRustImage, ImbufTryIntoRustImage,
-    IncompatibleLayoutError,
-};
-pub use into_imbuf::{ImageToImbuf, IntoDynamicImageError, IntoDynamicImageErrorReason};
+pub use from_imbuf::{ImbufAsImage, ImbufAsImageMut, ImbufIntoImage, IncompatibleLayoutError};
+pub use into_imbuf::{ImageIntoImbuf, IntoImbufError, IntoImbufErrorReason};
 pub use ref_image::{DynamicRefImage, DynamicRefImageMut};
 
 /// The buffer length did not match the image dimensions.

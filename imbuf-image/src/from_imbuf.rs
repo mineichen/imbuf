@@ -18,31 +18,38 @@ pub struct IncompatibleLayoutError {
 }
 
 /// Borrows an [`imbuf`] buffer as an [`image`] value.
-pub trait ImbufAsRustImage {
+pub trait ImbufAsImage {
+    /// The returned image for infallible conversions, or a `Result` for
+    /// fallible ones.
+    type Result<'a>
+    where
+        Self: 'a;
+
     /// Borrows the buffer as a shared [`DynamicRefImage`] without copying.
-    ///
-    /// # Errors
-    /// Fails if the buffer layout cannot be represented as an `image` type.
-    fn as_rust_image_dynamic(&self) -> Result<DynamicRefImage<'_>, IncompatibleLayoutError>;
+    fn as_rust_image_dynamic(&self) -> Self::Result<'_>;
 }
 
 /// Mutably borrows an [`imbuf`] buffer as an [`image`] value.
-pub trait ImbufAsRustImageMut {
+pub trait ImbufAsImageMut {
+    /// The returned image for infallible conversions, or a `Result` for
+    /// fallible ones.
+    type Result<'a>
+    where
+        Self: 'a;
+
     /// Borrows the buffer as a [`DynamicRefImageMut`] without copying.
-    ///
-    /// # Errors
-    /// Fails if the buffer layout cannot be represented as an `image` type.
-    fn as_rust_image_dynamic_mut(
-        &mut self,
-    ) -> Result<DynamicRefImageMut<'_>, IncompatibleLayoutError>;
+    fn as_rust_image_dynamic_mut(&mut self) -> Self::Result<'_>;
 }
 
 macro_rules! impl_from_borrowed_image_buffer {
     ($($variant:ident),+ $(,)?) => {
-        impl ImbufAsRustImage for image::DynamicImage {
-            fn as_rust_image_dynamic(
-                &self,
-            ) -> Result<DynamicRefImage<'_>, IncompatibleLayoutError> {
+        impl ImbufAsImage for image::DynamicImage {
+            type Result<'a>
+                = std::result::Result<DynamicRefImage<'a>, IncompatibleLayoutError>
+            where
+                Self: 'a;
+
+            fn as_rust_image_dynamic(&self) -> Self::Result<'_> {
                 match self {
                     $(image::DynamicImage::$variant(x) => Ok(x.into()),)+
                     _ => Err(IncompatibleLayoutError {
@@ -53,10 +60,13 @@ macro_rules! impl_from_borrowed_image_buffer {
             }
         }
 
-        impl ImbufAsRustImageMut for image::DynamicImage {
-            fn as_rust_image_dynamic_mut(
-                &mut self,
-            ) -> Result<DynamicRefImageMut<'_>, IncompatibleLayoutError> {
+        impl ImbufAsImageMut for image::DynamicImage {
+            type Result<'a>
+                = std::result::Result<DynamicRefImageMut<'a>, IncompatibleLayoutError>
+            where
+                Self: 'a;
+
+            fn as_rust_image_dynamic_mut(&mut self) -> Self::Result<'_> {
                 match self {
                     $(image::DynamicImage::$variant(x) => Ok(x.into()),)+
                     _ => Err(IncompatibleLayoutError {
@@ -115,16 +125,24 @@ impl<'a> TryFrom<&'a imbuf::DynamicImage> for DynamicRefImage<'a> {
     }
 }
 
-impl ImbufAsRustImage for imbuf::DynamicImage {
-    fn as_rust_image_dynamic(&self) -> Result<DynamicRefImage<'_>, IncompatibleLayoutError> {
+impl ImbufAsImage for imbuf::DynamicImage {
+    type Result<'a>
+        = std::result::Result<DynamicRefImage<'a>, IncompatibleLayoutError>
+    where
+        Self: 'a;
+
+    fn as_rust_image_dynamic(&self) -> Self::Result<'_> {
         DynamicRefImage::try_from(self)
     }
 }
 
-impl ImbufAsRustImageMut for imbuf::DynamicImage {
-    fn as_rust_image_dynamic_mut(
-        &mut self,
-    ) -> Result<DynamicRefImageMut<'_>, IncompatibleLayoutError> {
+impl ImbufAsImageMut for imbuf::DynamicImage {
+    type Result<'a>
+        = std::result::Result<DynamicRefImageMut<'a>, IncompatibleLayoutError>
+    where
+        Self: 'a;
+
+    fn as_rust_image_dynamic_mut(&mut self) -> Self::Result<'_> {
         DynamicRefImageMut::try_from(self)
     }
 }
@@ -162,47 +180,47 @@ impl<'a> TryFrom<&'a mut imbuf::DynamicImage> for DynamicRefImageMut<'a> {
     }
 }
 
-/// Converts an owned [`imbuf`] image with a statically known layout into an
-/// owned [`image::DynamicImage`].
+/// Converts an owned [`imbuf`] image into an owned [`image::DynamicImage`].
 ///
 /// Uniquely owned buffers are moved without copying; shared buffers are copied.
-/// The conversion is infallible because the typed source already matches an
-/// `image` variant.
-pub trait ImbufIntoRustImage {
-    fn into_rust_image_dynamic(self) -> image::DynamicImage;
-}
+/// The concrete return type is a direct image for infallible conversions or a
+/// `Result` for fallible ones.
+pub trait ImbufIntoImage {
+    /// The returned image for infallible conversions, or a `Result` for
+    /// fallible ones.
+    type Result;
 
-/// Fallibly converts an owned [`imbuf::DynamicImage`] into an owned
-/// [`image::DynamicImage`].
-///
-/// The conversion fails if the dynamic image has more than one channel or a
-/// depth/pixel layout that `image` cannot represent.
-pub trait ImbufTryIntoRustImage {
-    fn into_rust_image_dynamic(self) -> Result<image::DynamicImage, IncompatibleLayoutError>;
+    fn into_rust_image_dynamic(self) -> Self::Result;
 }
 
 macro_rules! impl_imbuf_to_image {
     ($src:ty, $variant:ident) => {
-        impl ImbufAsRustImage for Image<$src, 1> {
-            fn as_rust_image_dynamic(
-                &self,
-            ) -> Result<DynamicRefImage<'_>, IncompatibleLayoutError> {
-                Ok(DynamicRefImage::$variant(ref_image(self.first())))
+        impl ImbufAsImage for Image<$src, 1> {
+            type Result<'a>
+                = DynamicRefImage<'a>
+            where
+                Self: 'a;
+
+            fn as_rust_image_dynamic(&self) -> Self::Result<'_> {
+                DynamicRefImage::$variant(ref_image(self.first()))
             }
         }
 
-        impl ImbufAsRustImageMut for Image<$src, 1> {
-            fn as_rust_image_dynamic_mut(
-                &mut self,
-            ) -> Result<DynamicRefImageMut<'_>, IncompatibleLayoutError> {
-                Ok(DynamicRefImageMut::$variant(ref_image_mut(
-                    self.first_mut(),
-                )))
+        impl ImbufAsImageMut for Image<$src, 1> {
+            type Result<'a>
+                = DynamicRefImageMut<'a>
+            where
+                Self: 'a;
+
+            fn as_rust_image_dynamic_mut(&mut self) -> Self::Result<'_> {
+                DynamicRefImageMut::$variant(ref_image_mut(self.first_mut()))
             }
         }
 
-        impl ImbufIntoRustImage for Image<$src, 1> {
-            fn into_rust_image_dynamic(self) -> image::DynamicImage {
+        impl ImbufIntoImage for Image<$src, 1> {
+            type Result = image::DynamicImage;
+
+            fn into_rust_image_dynamic(self) -> Self::Result {
                 let (width, height) = self.dimensions();
                 let [channel] = <[_; 1]>::from(self);
                 let buffer = channel.into_vec_flat();
@@ -223,8 +241,10 @@ impl_imbuf_to_image!([u8; 4], ImageRgba8);
 impl_imbuf_to_image!([u16; 4], ImageRgba16);
 impl_imbuf_to_image!([f32; 4], ImageRgba32F);
 
-impl ImbufTryIntoRustImage for imbuf::DynamicImage {
-    fn into_rust_image_dynamic(self) -> Result<image::DynamicImage, IncompatibleLayoutError> {
+impl ImbufIntoImage for imbuf::DynamicImage {
+    type Result = std::result::Result<image::DynamicImage, IncompatibleLayoutError>;
+
+    fn into_rust_image_dynamic(self) -> Self::Result {
         enum Depth {
             U8,
             U16,
@@ -252,7 +272,8 @@ impl ImbufTryIntoRustImage for imbuf::DynamicImage {
         ) -> Result<image::DynamicImage, IncompatibleLayoutError>
         where
             TP: imbuf::PixelType,
-            imbuf::Image<TP, N>: TryFrom<imbuf::DynamicImage> + ImbufIntoRustImage,
+            imbuf::Image<TP, N>:
+                TryFrom<imbuf::DynamicImage> + ImbufIntoImage<Result = image::DynamicImage>,
         {
             let image =
                 imbuf::Image::<TP, N>::try_from(dynamic).map_err(|_| IncompatibleLayoutError {
@@ -280,13 +301,12 @@ impl ImbufTryIntoRustImage for imbuf::DynamicImage {
         }
     }
 }
-/// The depth of an [`imbuf`] channel, matching the owned conversion arms.
 
 fn image_from_raw<P, T>(width: u32, height: u32, buffer: Vec<T>) -> ImageBuffer<P, Vec<T>>
 where
     P: image::Pixel<Subpixel = T>,
 {
-    ImageBuffer::from_raw(width, height, buffer).expect("There is no conversion which can fail")
+    ImageBuffer::from_raw(width, height, buffer).expect("Incompatible buffer size")
 }
 
 fn ref_image<P, TP>(channel: &ImageChannel<TP>) -> ImageBuffer<P, &[TP::Primitive]>
@@ -347,10 +367,7 @@ mod tests {
         let image =
             Image::<[u16; 3], 1>::new_vec(vec![[0, 1, 2]], NonZeroU32::MIN, NonZeroU32::MIN);
 
-        assert_eq!(
-            expected,
-            test_encode(image.as_rust_image_dynamic().unwrap())
-        );
+        assert_eq!(expected, test_encode(image.as_rust_image_dynamic()));
         let dynamic = imbuf::DynamicImage::from(image);
         assert_eq!(
             expected,
@@ -362,9 +379,21 @@ mod tests {
     fn into_image_round_trips() {
         let image = Image::<u8, 1>::new_vec(vec![1], NonZeroU32::MIN, NonZeroU32::MIN);
         assert_eq!(
-            test_encode(image.as_rust_image_dynamic().unwrap()),
+            test_encode(image.as_rust_image_dynamic()),
             test_encode_owned(image.into_rust_image_dynamic())
         );
+    }
+
+    #[test]
+    fn dynamic_into_rust_image_returns_result() {
+        let image = Image::<[u8; 3], 1>::new_vec(vec![[1, 2, 3]], NonZeroU32::MIN, NonZeroU32::MIN);
+        let dynamic = imbuf::DynamicImage::from(image);
+
+        let image::DynamicImage::ImageRgb8(buffer) = dynamic.into_rust_image_dynamic().unwrap()
+        else {
+            panic!("Expected Rgb8");
+        };
+        assert_eq!(buffer.as_raw(), &[1, 2, 3]);
     }
 
     #[test]
@@ -373,7 +402,7 @@ mod tests {
             Image::<u8, 1>::new_vec(vec![1, 2, 3], NonZeroU32::new(3).unwrap(), NonZeroU32::MIN);
         let data_ptr = img.buffer().as_ptr() as usize;
 
-        let borrowed = img.as_rust_image_dynamic().unwrap();
+        let borrowed = img.as_rust_image_dynamic();
         let DynamicRefImage::ImageLuma8(buffer) = borrowed else {
             panic!("Expected Luma8");
         };
@@ -388,7 +417,7 @@ mod tests {
         let data_ptr = img.buffer().as_ptr() as usize;
 
         {
-            let borrowed = img.as_rust_image_dynamic_mut().unwrap();
+            let borrowed = img.as_rust_image_dynamic_mut();
             let DynamicRefImageMut::ImageLuma8(mut buffer) = borrowed else {
                 panic!("Expected Luma8");
             };
@@ -405,7 +434,7 @@ mod tests {
             Image::<u8, 1>::new_vec(vec![1, 2, 3], NonZeroU32::new(3).unwrap(), NonZeroU32::MIN);
         let data_ptr = img.buffer().as_ptr() as usize;
 
-        let borrowed = img.as_rust_image_dynamic().unwrap();
+        let borrowed = img.as_rust_image_dynamic();
         let DynamicRefImage::ImageLuma8(buffer) = borrowed else {
             panic!("Expected Luma8");
         };
@@ -420,7 +449,7 @@ mod tests {
         let data_ptr = img.buffer().as_ptr() as usize;
 
         let img_ref = &mut img;
-        let borrowed = img_ref.as_rust_image_dynamic().unwrap();
+        let borrowed = img_ref.as_rust_image_dynamic();
         let DynamicRefImage::ImageLuma8(buffer) = borrowed else {
             panic!("Expected Luma8");
         };
@@ -435,7 +464,7 @@ mod tests {
         let data_ptr = img.buffer().as_ptr() as usize;
 
         {
-            let borrowed = img.as_rust_image_dynamic_mut().unwrap();
+            let borrowed = img.as_rust_image_dynamic_mut();
             let DynamicRefImageMut::ImageLuma8(mut buffer) = borrowed else {
                 panic!("Expected Luma8");
             };

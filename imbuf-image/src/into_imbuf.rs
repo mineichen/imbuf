@@ -8,14 +8,14 @@ use crate::IncompatibleBufferSize;
 #[derive(thiserror::Error, Debug)]
 #[error("Cannot convert {image:?} into DynamicImage: {reason}")]
 #[non_exhaustive]
-pub struct IntoDynamicImageError {
+pub struct IntoImbufError {
     pub image: image::DynamicImage,
-    pub reason: IntoDynamicImageErrorReason,
+    pub reason: IntoImbufErrorReason,
 }
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum IntoDynamicImageErrorReason {
+pub enum IntoImbufErrorReason {
     #[error("Neither height nor length can be 0")]
     ZeroDimension(#[from] std::num::TryFromIntError),
     #[error(transparent)]
@@ -27,14 +27,14 @@ pub enum IntoDynamicImageErrorReason {
 }
 
 /// Converts an [`image`] `DynamicImage` into an [`imbuf`] buffer.
-pub trait ImageToImbuf {
+pub trait ImageIntoImbuf {
     /// # Errors
     /// Fails if a dimension is zero or a buffer length does not match the
     /// dimensions.
-    fn into_imbuf_dynamic(self) -> Result<imbuf::DynamicImage, IntoDynamicImageError>;
+    fn into_imbuf_dynamic(self) -> Result<imbuf::DynamicImage, IntoImbufError>;
 
     /// # Errors
-    /// Fails for the same reasons as [`ImageToImbuf::into_imbuf_dynamic`], or if the
+    /// Fails for the same reasons as [`ImbufIntoImage::into_imbuf_dynamic`], or if the
     /// layout does not match the requested [`imbuf::Image`] type.
     fn into_imbuf_specific<TP, const CHANNELS: usize>(
         self,
@@ -44,14 +44,14 @@ pub trait ImageToImbuf {
         imbuf::Image<TP, CHANNELS>: TryFrom<imbuf::DynamicImage, Error: std::fmt::Display>;
 }
 
-impl ImageToImbuf for image::DynamicImage {
-    fn into_imbuf_dynamic(self) -> Result<imbuf::DynamicImage, IntoDynamicImageError> {
+impl ImageIntoImbuf for image::DynamicImage {
+    fn into_imbuf_dynamic(self) -> Result<imbuf::DynamicImage, IntoImbufError> {
         let (width, height) = self.dimensions();
         let width_times_height = width as usize * height as usize;
         let width = match NonZeroU32::try_from(width) {
             Ok(width) => width,
             Err(e) => {
-                return Err(IntoDynamicImageError {
+                return Err(IntoImbufError {
                     image: self,
                     reason: e.into(),
                 });
@@ -61,7 +61,7 @@ impl ImageToImbuf for image::DynamicImage {
         let height = match NonZeroU32::try_from(height) {
             Ok(height) => height,
             Err(e) => {
-                return Err(IntoDynamicImageError {
+                return Err(IntoImbufError {
                     image: self,
                     reason: e.into(),
                 });
@@ -123,9 +123,9 @@ impl ImageToImbuf for image::DynamicImage {
             )
             .into(),
             _ => {
-                return Err(IntoDynamicImageError {
+                return Err(IntoImbufError {
                     image: self,
-                    reason: IntoDynamicImageErrorReason::NonExhaustive,
+                    reason: IntoImbufErrorReason::NonExhaustive,
                 });
             }
         })
@@ -146,14 +146,14 @@ impl ImageToImbuf for image::DynamicImage {
 fn extract_vec<TPixel: image::Pixel>(
     image: ImageBuffer<TPixel, Vec<TPixel::Subpixel>>,
     width_times_height: usize,
-) -> Result<Vec<TPixel::Subpixel>, IntoDynamicImageError>
+) -> Result<Vec<TPixel::Subpixel>, IntoImbufError>
 where
     image::DynamicImage: From<ImageBuffer<TPixel, Vec<TPixel::Subpixel>>>,
 {
     let actual = image.len();
     let expected = width_times_height * TPixel::CHANNEL_COUNT as usize;
     if actual != expected {
-        return Err(IntoDynamicImageError {
+        return Err(IntoImbufError {
             image: image.into(),
             reason: IncompatibleBufferSize { expected, actual }.into(),
         });

@@ -1,7 +1,10 @@
 use std::{
     fmt::Debug,
+    iter::{self, once},
     mem::MaybeUninit,
     num::{NonZeroU8, NonZeroU32, NonZeroUsize},
+    ops::Deref,
+    slice, vec,
 };
 
 use crate::{Image, ImageChannel, ImageMut, ImageRef, PixelType, pixel::DynamicSize};
@@ -20,7 +23,7 @@ impl DynamicImage {
         rest: impl IntoIterator<Item = DynamicImageChannel>,
     ) -> Self {
         Self {
-            channels: std::iter::once(first).chain(rest).collect(),
+            channels: once(first).chain(rest).collect(),
         }
     }
     /// `DynamicImage` always has at least one channel, so this never panics
@@ -55,10 +58,7 @@ impl DynamicImage {
     pub fn mapped_channels<'a, T: 'a, TF>(
         &'a self,
         mapper: TF,
-    ) -> (
-        T,
-        std::iter::Map<std::slice::Iter<'a, DynamicImageChannel>, TF>,
-    )
+    ) -> (T, iter::Map<slice::Iter<'a, DynamicImageChannel>, TF>)
     where
         TF: FnMut(&'a DynamicImageChannel) -> T,
     {
@@ -71,10 +71,7 @@ impl DynamicImage {
     pub fn mapped_channels_mut<'a, T: 'a, TF>(
         &'a mut self,
         mapper: TF,
-    ) -> (
-        T,
-        std::iter::Map<std::slice::IterMut<'a, DynamicImageChannel>, TF>,
-    )
+    ) -> (T, iter::Map<slice::IterMut<'a, DynamicImageChannel>, TF>)
     where
         TF: FnMut(&'a mut DynamicImageChannel) -> T,
     {
@@ -87,10 +84,7 @@ impl DynamicImage {
     pub fn into_mapped_channels<T, TF>(
         self,
         mapper: TF,
-    ) -> (
-        T,
-        std::iter::Map<std::vec::IntoIter<DynamicImageChannel>, TF>,
-    )
+    ) -> (T, iter::Map<vec::IntoIter<DynamicImageChannel>, TF>)
     where
         TF: FnMut(DynamicImageChannel) -> T,
     {
@@ -107,7 +101,7 @@ impl DynamicImage {
 }
 
 // Deref slice only, to make sure, noone can create a DynamicImage with a empty Vec
-impl std::ops::Deref for DynamicImage {
+impl Deref for DynamicImage {
     type Target = [DynamicImageChannel];
 
     fn deref(&self) -> &Self::Target {
@@ -117,7 +111,7 @@ impl std::ops::Deref for DynamicImage {
 
 impl IntoIterator for DynamicImage {
     type Item = DynamicImageChannel;
-    type IntoIter = std::vec::IntoIter<DynamicImageChannel>;
+    type IntoIter = vec::IntoIter<DynamicImageChannel>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.channels.into_iter()
