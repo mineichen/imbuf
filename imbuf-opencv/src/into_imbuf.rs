@@ -1,6 +1,7 @@
 use std::{
+    ffi::c_void,
     fmt::Display,
-    mem::transmute,
+    mem::{ManuallyDrop, transmute},
     num::{NonZeroU8, NonZeroU32},
     slice,
 };
@@ -10,39 +11,42 @@ use imbuf::{
     PixelTypePrimitive, UnsafeImageChannel,
 };
 use opencv::{
-    boxed_ref::BoxedRef,
-    core::{CV_8U, CV_16U, CV_32F, CV_MAT_DEPTH_MASK, Code, Mat, MatTraitConst, Range, Vector},
+    core::{
+        CV_8U, CV_16U, CV_32F, CV_MAT_DEPTH_MASK, Code, Mat, MatTraitConst, Range, UMatData,
+        UMatDataTraitConst, Vector,
+    },
     prelude::MatTraitConstManual,
-    traits::OpenCVIntoExternContainer,
+    traits::{Boxed, OpenCVIntoExternContainer},
 };
 
-/// Converts an OpenCV [`Mat`] into an [`imbuf`] buffer without copying where
-/// possible.
+/// Converts an owned OpenCV [`Mat`] into an [`imbuf`] buffer without copying
+/// pixel data (the `Mat` is moved into the imbuf allocation).
 ///
-/// Conversions into a typed [`imbuf::Image`] are available through
-/// [`OpencvToImbuf::into_imbuf`].
-pub trait OpencvToImbuf {
+/// This is the only direction that can hand a buffer over: the resulting
+/// [`DynamicImage`] owns the `Mat`'s memory through the `imbuf` channel vtable,
+/// so no copy is needed.
+pub trait OpencvIntoImbuf {
     /// # Errors
     /// Fails if the `Mat` is empty, not contiguous, not 2D/3D, or has an
     /// unsupported depth.
-    fn into_dyn_imbuf(self) -> opencv::Result<imbuf::DynamicImage>;
+    fn into_imbuf_dynamic(self) -> opencv::Result<DynamicImage>;
 
     /// # Errors
-    /// Fails for the same reasons as [`OpencvToImbuf::into_dyn_imbuf`], or if the
-    /// `Mat` layout does not match the requested [`imbuf::Image`] type.
-    fn into_imbuf<TP: PixelType, const CHANNELS: usize>(
+    /// Fails for the same reasons as [`OpencvIntoImbuf::into_imbuf_dynamic`], or
+    /// if the `Mat` layout does not match the requested [`imbuf::Image`] type.
+    fn into_imbuf_specific<TP: PixelType, const CHANNELS: usize>(
         self,
-    ) -> opencv::Result<imbuf::Image<TP, CHANNELS>>
+    ) -> opencv::Result<Image<TP, CHANNELS>>
     where
         Image<TP, CHANNELS>: TryFrom<DynamicImage, Error: Display>;
 }
 
-impl<H: MatHeader> OpencvToImbuf for H {
-    fn into_dyn_imbuf(self) -> opencv::Result<DynamicImage> {
+impl OpencvIntoImbuf for Mat {
+    fn into_imbuf_dynamic(self) -> opencv::Result<DynamicImage> {
         match self.typ() & CV_MAT_DEPTH_MASK {
-            CV_8U => dynamic_image::<H, u8>(self),
-            CV_16U => dynamic_image::<H, u16>(self),
-            CV_32F => dynamic_image::<H, f32>(self),
+            CV_8U => dynamic_image::<u8>(self),
+            CV_16U => dynamic_image::<u16>(self),
+            CV_32F => dynamic_image::<f32>(self),
             _ => Err(opencv::Error::new(
                 Code::StsUnsupportedFormat.into(),
                 "Mat depth must be CV_8U, CV_16U or CV_32F",
@@ -50,47 +54,18 @@ impl<H: MatHeader> OpencvToImbuf for H {
         }
     }
 
-    fn into_imbuf<TP: PixelType, const CHANNELS: usize>(
+    fn into_imbuf_specific<TP: PixelType, const CHANNELS: usize>(
         self,
-    ) -> opencv::Result<imbuf::Image<TP, CHANNELS>>
+    ) -> opencv::Result<Image<TP, CHANNELS>>
     where
         Image<TP, CHANNELS>: TryFrom<DynamicImage, Error: Display>,
     {
-        Image::try_from(self.into_dyn_imbuf()?).map_err(|e| {
-            opencv::error::Error::new(Code::StsUnsupportedFormat.into(), format!("{e}"))
-        })
+        Image::try_from(self.into_imbuf_dynamic()?)
+            .map_err(|e| opencv::Error::new(Code::StsUnsupportedFormat.into(), format!("{e}")))
     }
 }
 
-trait MatHeader: MatTraitConst + 'static + Sized {
-    fn from_owned(mat: Mat) -> Self;
-
-    fn shallow_copy(&self) -> opencv::Result<Mat> {
-        Mat::copy(self).and_then(OpenCVIntoExternContainer::opencv_into_extern_container)
-    }
-
-    fn shared(&self) -> opencv::Result<Self> {
-        Ok(Self::from_owned(self.shallow_copy()?))
-    }
-
-    fn unique(&self) -> opencv::Result<Self> {
-        Ok(Self::from_owned(self.try_clone()?))
-    }
-}
-
-impl MatHeader for Mat {
-    fn from_owned(mat: Mat) -> Self {
-        mat
-    }
-}
-
-impl MatHeader for BoxedRef<'static, Mat> {
-    fn from_owned(mat: Mat) -> Self {
-        BoxedRef::from(mat)
-    }
-}
-
-fn dynamic_image<H: MatHeader, P: PixelTypePrimitive>(mat: H) -> opencv::Result<DynamicImage> {
+fn dynamic_image<P: PixelTypePrimitive>(mat: Mat) -> opencv::Result<DynamicImage> {
     let dims = mat.dims();
     if !(2..=3).contains(&dims) || mat.data().is_null() {
         return Err(opencv::Error::new(
@@ -109,7 +84,7 @@ fn dynamic_image<H: MatHeader, P: PixelTypePrimitive>(mat: H) -> opencv::Result<
         let width = nonzero_dimension(mat.cols())?;
         let height = nonzero_dimension(mat.rows())?;
         let pixel_elements = nonzero_pixel_elements(mat.channels())?;
-        let channel = unsafe { into_channel::<H, P>(Box::new(mat), width, height, pixel_elements) };
+        let channel = unsafe { into_channel::<P>(mat, width, height, pixel_elements) };
         Ok(DynamicImage::from_channels(channel.into(), []))
     } else {
         if mat.channels() != 1 {
@@ -123,7 +98,7 @@ fn dynamic_image<H: MatHeader, P: PixelTypePrimitive>(mat: H) -> opencv::Result<
         let width = nonzero_dimension(sizes[2])?;
         let height = nonzero_dimension(sizes[1])?;
         let channels = (0..planes.get())
-            .map(|plane| planar_channel::<H, P>(&mat, plane as i32, width, height))
+            .map(|plane| planar_channel::<P>(&mat, plane as i32, width, height))
             .collect::<opencv::Result<Vec<_>>>()?;
         let mut channels = channels.into_iter();
         let Some(first) = channels.next() else {
@@ -139,43 +114,71 @@ fn dynamic_image<H: MatHeader, P: PixelTypePrimitive>(mat: H) -> opencv::Result<
     }
 }
 
-trait ChannelStorage<P: PixelTypePrimitive>: MatHeader {
-    const VTABLE: &'static ImageChannelVTable<P>;
+/// Mirrors the public, ABI-stable prefix of `cv::Mat`.
+///
+/// The generated `cv_Mat_propU` shim dereferences `u` and therefore crashes for
+/// Mats over external data (`u == null`), so read the public field directly.
+#[repr(C)]
+struct MatHeader {
+    flags: i32,
+    dims: i32,
+    rows: i32,
+    cols: i32,
+    data: *mut c_void,
+    datastart: *const c_void,
+    dataend: *const c_void,
+    datalimit: *const c_void,
+    allocator: *mut c_void,
+    u: *mut c_void,
 }
 
-impl<H: MatHeader, P: PixelTypePrimitive> ChannelStorage<P> for H {
-    const VTABLE: &'static ImageChannelVTable<P> = &ImageChannelVTable {
-        clone: clone_mat_channel::<H, P>,
-        make_mut: make_mat_channel_mut::<H, P>,
-        drop: drop_mat_channel::<H, P>,
-    };
+/// Returns `true` if this `Mat` header is the sole owner of its pixel buffer.
+///
+/// Mats over external data (`u == null`) have no refcount and are never
+/// considered exclusive. `urefcount`/`mapcount` guard against a `UMat` or
+/// device mapping aliasing the same allocation.
+fn mat_buffer_is_exclusive(mat: &Mat) -> bool {
+    let u_ptr = unsafe { (*mat.as_raw().cast::<MatHeader>()).u };
+    if u_ptr.is_null() {
+        return false;
+    }
+    // `UMatData` is generated as an owning boxed type; wrap it so dropping the
+    // view does not delete the allocation owned by the `Mat`.
+    let u = ManuallyDrop::new(unsafe { UMatData::from_raw(u_ptr) });
+    u.refcount() == 1 && u.urefcount() == 0 && u.mapcount() == 0
 }
 
-unsafe fn into_channel<H: MatHeader, P: PixelTypePrimitive>(
-    mat: Box<H>,
+/// Reborrows the `cv::Mat` owned by `data` without taking ownership.
+unsafe fn mat_view(data: *mut ()) -> ManuallyDrop<Mat> {
+    ManuallyDrop::new(unsafe { Mat::from_raw(data.cast()) })
+}
+
+const fn vtable<P: PixelTypePrimitive>() -> &'static ImageChannelVTable<P> {
+    &ImageChannelVTable {
+        clone: clone_mat_channel::<P>,
+        make_mut: make_mat_channel_mut::<P>,
+        drop: drop_mat_channel::<P>,
+    }
+}
+
+unsafe fn into_channel<P: PixelTypePrimitive>(
+    mat: Mat,
     width: NonZeroU32,
     height: NonZeroU32,
     pixel_elements: NonZeroU8,
 ) -> ImageChannel<DynamicSize<P>> {
     let ptr = mat.data() as *const P;
-    let mat = Box::into_raw(mat);
+    let data = mat.into_raw().cast::<()>();
     let channel = unsafe {
-        UnsafeImageChannel::new_with_vtable(
-            ptr,
-            width,
-            height,
-            pixel_elements,
-            <H as ChannelStorage<P>>::VTABLE,
-            mat as *mut (),
-        )
+        UnsafeImageChannel::new_with_vtable(ptr, width, height, pixel_elements, vtable::<P>(), data)
     };
     // ImageChannel is #[repr(transparent)] over UnsafeImageChannel, and the only
     // wrapping constructor (`from_unsafe_internal`) is pub(crate) in imbuf 0.3
     unsafe { transmute::<UnsafeImageChannel<P>, ImageChannel<DynamicSize<P>>>(channel) }
 }
 
-fn planar_channel<H: MatHeader, P: PixelTypePrimitive>(
-    mat: &H,
+fn planar_channel<P: PixelTypePrimitive>(
+    mat: &Mat,
     plane: i32,
     width: NonZeroU32,
     height: NonZeroU32,
@@ -185,22 +188,22 @@ fn planar_channel<H: MatHeader, P: PixelTypePrimitive>(
     ranges.push(Range::all()?);
     ranges.push(Range::all()?);
     let view = Mat::ranges(mat, &ranges)?.opencv_into_extern_container()?;
-    Ok(unsafe { into_channel(Box::new(H::from_owned(view)), width, height, NonZeroU8::MIN) })
+    Ok(unsafe { into_channel(view, width, height, NonZeroU8::MIN) })
 }
 
-unsafe extern "C" fn clone_mat_channel<H: MatHeader, P: PixelTypePrimitive>(
+unsafe extern "C" fn clone_mat_channel<P: PixelTypePrimitive>(
     image: &UnsafeImageChannel<P>,
 ) -> UnsafeImageChannel<P> {
-    let mat = unsafe { &*(image.data as *const H) };
-    match mat.shared() {
-        Ok(shared) => unsafe {
+    let mat = unsafe { mat_view(image.data) };
+    match Mat::copy(&*mat).and_then(OpenCVIntoExternContainer::opencv_into_extern_container) {
+        Ok(cloned) => unsafe {
             UnsafeImageChannel::new_with_vtable(
-                image.ptr,
+                cloned.data().cast(),
                 image.width,
                 image.height,
                 image.pixel_elements,
                 image.vtable,
-                Box::into_raw(Box::new(shared)) as *mut (),
+                cloned.into_raw().cast::<()>(),
             )
         },
         Err(error) => {
@@ -210,25 +213,26 @@ unsafe extern "C" fn clone_mat_channel<H: MatHeader, P: PixelTypePrimitive>(
     }
 }
 
-unsafe extern "C" fn make_mat_channel_mut<H: MatHeader, P: PixelTypePrimitive>(
+unsafe extern "C" fn make_mat_channel_mut<P: PixelTypePrimitive>(
     image: &mut UnsafeImageChannel<P>,
 ) {
-    let mat = unsafe { &*(image.data as *const H) };
-    *image = match mat.unique() {
-        Ok(owned) => {
-            let ptr = owned.data() as *const P;
-            let data = Box::into_raw(Box::new(owned)) as *mut ();
-            unsafe {
-                UnsafeImageChannel::new_with_vtable(
-                    ptr,
-                    image.width,
-                    image.height,
-                    image.pixel_elements,
-                    image.vtable,
-                    data,
-                )
-            }
-        }
+    let mat = unsafe { mat_view(image.data) };
+    if mat_buffer_is_exclusive(&mat) {
+        // `image.ptr` already points into this Mat's buffer; keep it.
+        return;
+    }
+
+    *image = match mat.try_clone() {
+        Ok(owned) => unsafe {
+            UnsafeImageChannel::new_with_vtable(
+                owned.data().cast(),
+                image.width,
+                image.height,
+                image.pixel_elements,
+                image.vtable,
+                owned.into_raw().cast(),
+            )
+        },
         Err(error) => {
             log::warn!("Cloning channel as Vec copy, cannot clone Mat buffer: {error}");
             copied_channel(image)
@@ -236,8 +240,8 @@ unsafe extern "C" fn make_mat_channel_mut<H: MatHeader, P: PixelTypePrimitive>(
     };
 }
 
-unsafe extern "C" fn drop_mat_channel<H, P>(image: &mut UnsafeImageChannel<P>) {
-    drop(unsafe { Box::from_raw(image.data as *mut H) });
+unsafe extern "C" fn drop_mat_channel<P: PixelTypePrimitive>(image: &mut UnsafeImageChannel<P>) {
+    drop(unsafe { Mat::from_raw(image.data.cast()) });
 }
 
 fn copied_channel<P: PixelTypePrimitive>(image: &UnsafeImageChannel<P>) -> UnsafeImageChannel<P> {
@@ -279,7 +283,7 @@ mod tests {
     use testresult::TestResult;
 
     use super::*;
-    use crate::ImbufToOpencv;
+    use crate::ImbufAsOpencv;
 
     fn dimensions(width: u32, height: u32) -> (NonZeroU32, NonZeroU32) {
         (
@@ -288,15 +292,11 @@ mod tests {
         )
     }
 
-    fn boxed(mat: Mat) -> BoxedRef<'static, Mat> {
-        BoxedRef::from(mat)
-    }
-
     #[test]
     fn gray_u8_shares_buffer() {
-        let mat = boxed(Mat::from_slice_2d(&[[1u8, 2, 3], [4, 5, 6]]).unwrap());
+        let mat = Mat::from_slice_2d(&[[1u8, 2, 3], [4, 5, 6]]).unwrap();
         let data_ptr = mat.data() as usize;
-        let dynamic = mat.into_dyn_imbuf().unwrap();
+        let dynamic = mat.into_imbuf_dynamic().unwrap();
 
         assert_eq!(dynamic.len_nonzero().get(), 1);
         let DynamicImageChannel::U8(channel) = dynamic.first() else {
@@ -312,7 +312,7 @@ mod tests {
     fn gray_u16_shares_buffer() {
         let mat = Mat::from_slice_2d(&[[10u16, 20], [30, 40]]).unwrap();
         let data_ptr = mat.data() as usize;
-        let dynamic = mat.into_dyn_imbuf().unwrap();
+        let dynamic = mat.into_imbuf_dynamic().unwrap();
 
         assert_eq!(dynamic.len_nonzero().get(), 1);
         let DynamicImageChannel::U16(channel) = dynamic.first() else {
@@ -328,7 +328,7 @@ mod tests {
     fn f32_shares_buffer() {
         let mat = Mat::from_slice_2d(&[[0.5f32, 1.5], [2.5, 3.5]]).unwrap();
         let data_ptr = mat.data() as usize;
-        let dynamic = mat.into_dyn_imbuf().unwrap();
+        let dynamic = mat.into_imbuf_dynamic().unwrap();
 
         let DynamicImageChannel::F32(channel) = dynamic.first() else {
             panic!("Expected F32 channel");
@@ -342,7 +342,7 @@ mod tests {
     #[test]
     fn interleaved_channels_are_a_single_dynamic_channel() -> TestResult {
         let mat = Mat::from_slice_2d(&[[VecN([1u8, 2, 3]), VecN([4, 5, 6])]]).unwrap();
-        let dynamic = mat.into_dyn_imbuf().unwrap();
+        let dynamic = mat.into_imbuf_dynamic().unwrap();
 
         assert_eq!(dynamic.len_nonzero().get(), 1);
         assert!(Image::<u8, 3>::try_from(dynamic.clone()).is_err());
@@ -365,7 +365,7 @@ mod tests {
         assert_eq!(mat.dims(), 3);
 
         let data_ptr = mat.data() as usize;
-        let dynamic = mat.into_dyn_imbuf().unwrap();
+        let dynamic = mat.into_imbuf_dynamic().unwrap();
         assert!(dynamic.is_uniform());
         assert_eq!(dynamic.len_nonzero().get(), 3);
 
@@ -388,10 +388,18 @@ mod tests {
     }
 
     #[test]
+    fn specific_conversion_matches_the_requested_type() {
+        let mat = Mat::from_slice_2d(&[[1u8, 2, 3], [4, 5, 6]]).unwrap();
+        let image: Image<u8, 1> = mat.into_imbuf_specific().unwrap();
+        assert_eq!(image.dimensions(), dimensions(3, 2));
+        assert_eq!(image.buffer(), &[1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
     fn clone_shares_buffer_and_survives_drop_of_original() {
-        let mat = boxed(Mat::from_slice_2d(&[[1u8, 2], [3, 4]]).unwrap());
+        let mat = Mat::from_slice_2d(&[[1u8, 2], [3, 4]]).unwrap();
         let data_ptr = mat.data() as usize;
-        let dynamic = mat.into_dyn_imbuf().unwrap();
+        let dynamic = mat.into_imbuf_dynamic().unwrap();
         let cloned = dynamic.clone();
         drop(dynamic);
 
@@ -404,9 +412,9 @@ mod tests {
 
     #[test]
     fn make_mut_copies_shared_data() {
-        let mat = boxed(Mat::from_slice_2d(&[[1u8, 2], [3, 4]]).unwrap());
+        let mat = Mat::from_slice_2d(&[[1u8, 2], [3, 4]]).unwrap();
         let data_ptr = mat.data() as usize;
-        let mut dynamic = mat.into_dyn_imbuf().unwrap();
+        let mut dynamic = mat.into_imbuf_dynamic().unwrap();
         let cloned = dynamic.clone();
 
         let DynamicImageChannel::U8(channel) = &mut dynamic[0] else {
@@ -428,6 +436,60 @@ mod tests {
     }
 
     #[test]
+    fn make_mut_reuses_unique_mat_buffer() {
+        let mat = Mat::from_slice_2d(&[[1u8, 2], [3, 4]]).unwrap();
+        let data_ptr = mat.data() as usize;
+        let mut dynamic = mat.into_imbuf_dynamic().unwrap();
+
+        let DynamicImageChannel::U8(channel) = &mut dynamic[0] else {
+            panic!("Expected U8 channel");
+        };
+        channel.primitive_make_mut()[0] = 42;
+
+        let DynamicImageChannel::U8(channel) = &dynamic[0] else {
+            panic!("Expected U8 channel");
+        };
+        assert_eq!(channel.buffer_flat(), &[42, 2, 3, 4]);
+        assert_eq!(channel.buffer_flat().as_ptr() as usize, data_ptr);
+    }
+
+    #[test]
+    fn make_mut_copies_external_data_mat() {
+        let backing = [1u8, 2, 3, 4];
+        let borrowed = Mat::new_rows_cols_with_data(2, 2, &backing).unwrap();
+        let mat = borrowed.opencv_into_extern_container_nofail();
+        let data_ptr = mat.data() as usize;
+        let mut dynamic = mat.into_imbuf_dynamic().unwrap();
+
+        let DynamicImageChannel::U8(channel) = &mut dynamic[0] else {
+            panic!("Expected U8 channel");
+        };
+        channel.primitive_make_mut()[0] = 42;
+
+        let DynamicImageChannel::U8(channel) = &dynamic[0] else {
+            panic!("Expected U8 channel");
+        };
+        assert_eq!(channel.buffer_flat(), &[42, 2, 3, 4]);
+        assert_ne!(channel.buffer_flat().as_ptr() as usize, data_ptr);
+        assert_eq!(backing, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn refcount_detects_shallow_mat_copies() {
+        let mat = Mat::from_slice_2d(&[[1u8, 2], [3, 4]]).unwrap();
+        assert!(mat_buffer_is_exclusive(&mat));
+
+        let shared = Mat::copy(&mat)
+            .unwrap()
+            .opencv_into_extern_container()
+            .unwrap();
+        assert!(!mat_buffer_is_exclusive(&mat));
+
+        drop(shared);
+        assert!(mat_buffer_is_exclusive(&mat));
+    }
+
+    #[test]
     fn make_mut_on_second_plane_copies_only_that_plane() {
         let flat =
             Mat::from_slice_2d(&[[1u16, 2], [3, 4], [5, 6], [7, 8], [9, 10], [11, 12]]).unwrap();
@@ -436,7 +498,7 @@ mod tests {
             .unwrap()
             .opencv_into_extern_container_nofail();
         let data_ptr = mat.data() as usize;
-        let mut dynamic = mat.into_dyn_imbuf().unwrap();
+        let mut dynamic = mat.into_imbuf_dynamic().unwrap();
         let cloned = dynamic.clone();
         let plane_ptrs: Vec<usize> = (0..dynamic.len_nonzero().get())
             .map(|index| match &dynamic[index] {
@@ -474,9 +536,9 @@ mod tests {
     #[test]
     fn round_trip_through_borrowed_mat() {
         let mat = Mat::from_slice_2d(&[[1u16, 2], [3, 4]]).unwrap();
-        let dynamic = mat.into_dyn_imbuf().unwrap();
+        let dynamic = mat.into_imbuf_dynamic().unwrap();
 
-        let borrowed = dynamic.as_mat().unwrap();
+        let borrowed = dynamic.as_opencv().unwrap();
         let mat = &borrowed;
         assert_eq!(mat.rows(), 2);
         assert_eq!(mat.cols(), 2);
@@ -485,24 +547,44 @@ mod tests {
 
     #[test]
     fn empty_mat_is_rejected() {
-        let error = boxed(Mat::default()).into_dyn_imbuf().unwrap_err();
-        assert_eq!(error.code_as_enum(), Some(Code::StsBadArg));
+        let empty_outer: &[[u8; 10]] = &[];
+        let empty_inner_zero_i2: &[[u8; 0]] = &[[], []];
+        let empty_inner_zero_i1: &[[u8; 0]] = &[[]];
+        let empty_inner_and_outer: &[[u8; 0]] = &[];
+
+        fn assert_2d(s: &[impl AsRef<[u8]>], desc: &str) {
+            let x = Mat::from_slice_2d(s)
+                .unwrap()
+                .opencv_into_extern_container_nofail();
+            assert_mat(x, desc);
+        }
+        fn assert_mat(mat: Mat, desc: &str) {
+            let error = mat.into_imbuf_dynamic().expect_err("{desc}");
+            assert_eq!(error.code_as_enum(), Some(Code::StsBadArg), "{desc}");
+        }
+
+        assert_mat(Mat::default(), "default");
+        assert_2d(empty_outer, "empty_outer");
+        assert_2d(empty_inner_zero_i2, "empty_inner_zero_i2");
+        assert_2d(empty_inner_zero_i1, "empty_inner_zero_i1");
+        assert_2d(empty_inner_and_outer, "empty_inner_and_outer");
     }
 
     #[test]
     fn unsupported_depth_is_rejected() {
-        let mat = boxed(Mat::from_slice_2d(&[[1i32, 2], [3, 4]]).unwrap());
-        let error = mat.into_dyn_imbuf().unwrap_err();
+        let s = &[[1i32, 2], [3, 4]];
+        let mat = Mat::from_slice_2d(s).unwrap();
+        let error = mat.into_imbuf_dynamic().unwrap_err();
         assert_eq!(error.code_as_enum(), Some(Code::StsUnsupportedFormat));
     }
 
     #[test]
     fn non_continuous_mat_is_rejected() {
         let mat = Mat::from_slice_2d(&[[1u8, 2, 3], [4, 5, 6]]).unwrap();
-        let column = boxed(mat.col(0).unwrap().opencv_into_extern_container_nofail());
+        let column = mat.col(0).unwrap().opencv_into_extern_container_nofail();
         assert!(!column.is_continuous());
 
-        let error = column.into_dyn_imbuf().unwrap_err();
+        let error = column.into_imbuf_dynamic().unwrap_err();
         assert_eq!(error.code_as_enum(), Some(Code::StsUnmatchedSizes));
     }
 }
