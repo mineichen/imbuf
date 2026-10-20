@@ -79,7 +79,7 @@
           program = toString (pkgs.writeShellScript "miri" ''
             export PATH="${rustNightlyWithMiri}/bin:${pkgs.openssl.out}/bin:$PATH"
             export LD_LIBRARY_PATH="${pkgs.openssl.out}/lib"
-            exec ${rustNightlyWithMiri}/bin/cargo miri test -p imbuf
+            exec ${rustNightlyWithMiri}/bin/cargo miri test -p imbuf-image -p imbuf
           '');
         };
 

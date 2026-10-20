@@ -272,6 +272,20 @@ where
     }
 }
 
+impl<TP: RuntimePixelType> ImageChannels<[ImageChannel<TP>; 1]> {
+    /// Borrows the single channel of a one-channel image.
+    #[must_use]
+    pub fn first(&self) -> &ImageChannel<TP> {
+        &self.0[0]
+    }
+
+    /// Mutably borrows the single channel of a one-channel image.
+    #[must_use]
+    pub fn first_mut(&mut self) -> &mut ImageChannel<TP> {
+        &mut self.0[0]
+    }
+}
+
 impl<const PIXEL_ELEMENTS: usize, T: PixelTypePrimitive> Image<[T; PIXEL_ELEMENTS], 1> {
     #[must_use]
     pub fn from_planar_image<const CHANNELS: usize>(i: &Image<T, CHANNELS>) -> Self
@@ -403,6 +417,15 @@ mod tests {
     use std::num::NonZeroU32;
 
     use super::*;
+
+    #[test]
+    fn first_channel_access() {
+        let size = NonZeroU32::new(2).unwrap();
+        let mut image = Image::<u8, 1>::new_vec(vec![0, 1, 2, 3], size, size);
+        assert_eq!(image.first().dimensions(), (size, size));
+        image.first_mut().primitive_make_mut()[0] = 9;
+        assert_eq!(image.buffer(), &[9, 1, 2, 3]);
+    }
 
     #[test]
     fn create_image_from_borrowed_channels() {

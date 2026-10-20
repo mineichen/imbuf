@@ -19,5 +19,6 @@ This crate is the template: see the repository `README.md` for the short recipe.
 `imbuf` must not privilege any backend, so every integration lives in its own
 crate. Rust's orphan rules mean this crate provides the conversions through its
 own types and traits (borrowed `DynamicRefImage` / `DynamicRefImageMut` plus the
-`ImbufToImage`, `ImageToImbuf` and `IntoImage` extension traits), exactly like
-`imbuf-opencv`.
+`ImbufAsRustImage` / `ImbufAsRustImageMut` / `ImbufIntoRustImage` and
+`ImageToImbuf` extension traits),
+exactly like `imbuf-opencv`.

@@ -1,46 +1,11 @@
-# Unreleased
+# 0.3.4
 - Deprecate the `external` module (`image_0_25` integration). It now lives in the separate `imbuf-image` crate, which can be depended on directly.
-- The old API keeps working during migration.
-
-## Migration: `imbuf::external` -> `imbuf-image`
-
-Add the new crate (only the newest `imbuf` x `image` combination is released):
-
-```toml
-[dependencies]
-imbuf-image = "0.1"
-```
-
-Types were renamed and the conversions are now provided through extension
-traits, because a crate other than `imbuf` cannot write `From` / `TryFrom`
-impls between two foreign types (Rust orphan rules):
-
-| Old (deprecated in `imbuf::external`) | New (`imbuf_image`)           |
-| ------------------------------------- | ----------------------------- |
-| `DynamicRefImage0_25`                 | `DynamicRefImage`             |
-| `IntoDynamicImage0_25Error`           | `IntoDynamicImageError`       |
-| `IntoDynamicImage0_25ErrorReason`     | `IntoDynamicImageErrorReason` |
-| `IntoDynamicRefImage0_25Error`        | `IntoDynamicRefImageError`    |
-| `IncompatibleBufferSize`              | `IncompatibleBufferSize`      |
-
-Conversions:
-
-| Old                                            | New                                                   |
-| ---------------------------------------------- | ----------------------------------------------------- |
-| `DynamicRefImage0_25::from(&image)`            | `image.as_image_ref()` (via `ImbufToImage`)           |
-| `DynamicRefImage0_25::try_from(&dynamic)`      | `dynamic.as_image_ref()` (via `ImbufToImage`)         |
-| `image::DynamicImage::from(owned_image)`       | `owned_image.into_image()` (via `IntoImage`)          |
-| `imbuf::DynamicImage::try_from(image_dynamic)` | `image_dynamic.into_dyn_imbuf()` (via `ImageToImbuf`) |
-
-Remember to bring the traits into scope:
-
-```rust
-use imbuf_image::{ImbufToImage, ImageToImbuf, IntoImage};
-```
-
-If you need a different `image` version, or one matching an older `imbuf`
-release, implement the same conversions yourself in your own crate. See the
-repository `README.md`.
+  - The old API keeps working during migration.
+  - `imbuf_image::ImbufAsRustImage::as_rust_image_dynamic` and `ImbufAsRustImageMut::as_rust_image_mut` borrow an `imbuf` buffer as a `DynamicRefImage` / `DynamicRefImageMut` without copying.
+  - `imbuf_image::ImbufIntoRustImage::into_rust_image` converts an owned `imbuf` image into an owned `image::DynamicImage`.
+- Add `Image<_, 1>::first` / `first_mut` to borrow the single `ImageChannel` of a one-channel image.
+- Add `From<&ImageBuffer<_, &[_]>> for DynamicRefImage` for all supported pixel formats, borrowing the buffer without copying.
+- Rework the `imbuf-opencv` conversions: `ImbufAsOpencv::as_opencv` and `ImbufAsOpencv::as_opencv_mut` borrow an `imbuf` buffer as a `BoxedRef<Mat>` / `BoxedRefMut<Mat>` without copying, and `OpencvIntoImbuf::into_imbuf_dynamic` / `into_imbuf_specific` hand an owned `Mat` to `imbuf` without copying. There is no owned `imbuf`-to-`Mat` conversion, because a `Mat` cannot own an `imbuf` allocation without copying.
 
 # 0.3.3
 - Add `ImageChannel<DynamicSize<_>>::new_vec_dynamic`
