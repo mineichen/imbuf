@@ -45,6 +45,10 @@
         envVarAssignments = pkgs.lib.concatMapStringsSep " " (
           name: value: "${name}=\"${value}\""
         ) opencvEnvVars;
+        rustRpathFlags = pkgs.lib.concatStringsSep " " (
+          map (dir: "-C link-arg=-Wl,-rpath,${dir}")
+            (pkgs.lib.splitString ":" opencvEnvVars.LD_LIBRARY_PATH)
+        );
       in
       {
         devShells.default = pkgs.mkShell ({
@@ -70,7 +74,10 @@
             echo "===================================="
             echo "Ready to develop! 🦀"
           '';
-        } // opencvEnvVars);
+        } // opencvEnvVars // {
+          LD_LIBRARY_PATH = "";
+          RUSTFLAGS = rustRpathFlags;
+        });
 
         apps.miri = {
           type = "app";
