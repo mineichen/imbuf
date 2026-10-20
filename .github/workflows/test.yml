@@ -6,31 +6,36 @@ on:
   pull_request:
     branches: [main, master]
 
+permissions:
+  contents: read
+
 jobs:
   test:
-    name: Test Suite (Stable)
+    name: Test Suite
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Nix
+        uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
         with:
-          components: rustfmt, clippy
+          extra_nix_config: |
+            experimental-features = nix-command flakes
 
       - name: Run cargo test
-        run: cargo test --all-features
+        run: nix develop --command cargo test --workspace --all-features
 
   miri:
-    name: Miri Test Suite (Nightly)
+    name: Miri Test Suite (Nix)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Install Nix
+        uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
         with:
-          components: miri
+          extra_nix_config: |
+            experimental-features = nix-command flakes
 
       - name: Run cargo miri test
-        run: cargo miri test -p imbuf
+        run: nix run .#miri
