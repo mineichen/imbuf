@@ -164,9 +164,28 @@ where
 
 #[cfg(test)]
 mod tests {
-    use imbuf::Image;
+    use imbuf::{DynamicImageChannel, Image};
 
     use super::*;
+
+    #[test]
+    fn into_imbuf_dynamic_moves_image_buffer() {
+        let image = image::DynamicImage::new_luma8(3, 1);
+        let ptr = match &image {
+            image::DynamicImage::ImageLuma8(buffer) => buffer.as_raw().as_ptr(),
+            _ => unreachable!(),
+        };
+
+        let dynamic_image = image.into_imbuf_dynamic().unwrap();
+        let DynamicImageChannel::U8(channel) = dynamic_image.first() else {
+            panic!("expected U8");
+        };
+        let channel = channel
+            .try_cast::<u8>()
+            .expect("expected one byte per pixel");
+
+        assert_eq!(channel.buffer().as_ptr(), ptr);
+    }
 
     #[test]
     fn into_imbuf_dynamic_luma() {

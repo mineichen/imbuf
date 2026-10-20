@@ -6,8 +6,8 @@ moves where possible.
 
 Borrowing conversions expose the `imbuf` allocation as a `DynamicRefImage` /
 `DynamicRefImageMut`. Owned imbuf-to-image conversions move uniquely owned
-buffers, but copy shared buffers. Converting an `image::DynamicImage` into
-`imbuf` copies, because `image` owns its allocation.
+buffers, but copy shared buffers. Converting an owned `image::DynamicImage` into
+`imbuf` moves the buffer without copying.
 
 
 ## Which versions are covered?

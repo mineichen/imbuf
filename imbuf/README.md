@@ -36,7 +36,6 @@ The `Image` struct represents a fully typed Image to support the most common ima
 use std::{num::NonZeroU32, sync::Arc};
 use imbuf::{Image, DynamicImage, ImageChannel, DynamicImageChannel};
 
-# fn test() -> Result<(), Box<dyn std::error::Error>> {
 let pixel_data = vec![42, 1, 2];
 let data_addr = pixel_data.as_ptr();
 let image: Image<u8, 3> = imbuf::Image::new_vec(pixel_data, NonZeroU32::MIN, NonZeroU32::MIN);
@@ -50,13 +49,10 @@ let dynamic_clone = dynamic.clone();
     assert_eq!(data_addr, typed_channel.buffer().as_ptr(), "shared pointer reuses the buffer");
     assert_ne!(data_addr, typed_channel.make_mut().as_ptr(), "dynamic_clone prevents mut buffer reuse");
 }
-let mut typed: Image<u8, 3> = dynamic_clone.try_into()?;
+let mut typed: Image<u8, 3> = dynamic_clone.try_into().unwrap();
 let [r, g, b] = typed.make_mut();
 r[0] = 0;
 assert_eq!(data_addr, r.as_ptr(), "dynamic went out of scope, so buffer can be reused");
 let expected = imbuf::Image::new_vec(vec![0, 1, 2], NonZeroU32::MIN, NonZeroU32::MIN);
 assert_eq!(expected, typed, "images with different buffer can be compared");
-
-# Ok(())
-# }
 ```

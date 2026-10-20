@@ -35,10 +35,9 @@ let image: Image<u8, 1> = Image::new_vec(
     NonZeroU32::new(2).expect("non-zero height"),
 );
 
-let mat = image.as_opencv()?;
+let mat = image.as_opencv().expect("valid Mat layout");
 assert_eq!(mat.rows(), 2);
 assert_eq!(mat.cols(), 2);
-# Ok::<(), opencv::Error>(())
 ```
 
 ## Requirements
