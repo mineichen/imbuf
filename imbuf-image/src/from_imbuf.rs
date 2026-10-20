@@ -162,13 +162,23 @@ impl<'a> TryFrom<&'a mut imbuf::DynamicImage> for DynamicRefImageMut<'a> {
     }
 }
 
-/// Converts an owned [`imbuf`] image into an owned [`image::DynamicImage`].
+/// Converts an owned [`imbuf`] image with a statically known layout into an
+/// owned [`image::DynamicImage`].
 ///
 /// Uniquely owned buffers are moved without copying; shared buffers are copied.
-/// Local because both source and target are foreign types.
+/// The conversion is infallible because the typed source already matches an
+/// `image` variant.
 pub trait ImbufIntoRustImage {
-    type Error;
-    fn into_rust_image_dynamic(self) -> Result<image::DynamicImage, Self::Error>;
+    fn into_rust_image_dynamic(self) -> image::DynamicImage;
+}
+
+/// Fallibly converts an owned [`imbuf::DynamicImage`] into an owned
+/// [`image::DynamicImage`].
+///
+/// The conversion fails if the dynamic image has more than one channel or a
+/// depth/pixel layout that `image` cannot represent.
+pub trait ImbufTryIntoRustImage {
+    fn into_rust_image_dynamic(self) -> Result<image::DynamicImage, IncompatibleLayoutError>;
 }
 
 macro_rules! impl_imbuf_to_image {
@@ -192,16 +202,11 @@ macro_rules! impl_imbuf_to_image {
         }
 
         impl ImbufIntoRustImage for Image<$src, 1> {
-            type Error = std::convert::Infallible;
-            fn into_rust_image_dynamic(self) -> Result<image::DynamicImage, Self::Error> {
+            fn into_rust_image_dynamic(self) -> image::DynamicImage {
                 let (width, height) = self.dimensions();
                 let [channel] = <[_; 1]>::from(self);
                 let buffer = channel.into_vec_flat();
-                Ok(image::DynamicImage::$variant(image_from_raw(
-                    width.get(),
-                    height.get(),
-                    buffer,
-                )))
+                image::DynamicImage::$variant(image_from_raw(width.get(), height.get(), buffer))
             }
         }
     };
@@ -218,9 +223,13 @@ impl_imbuf_to_image!([u8; 4], ImageRgba8);
 impl_imbuf_to_image!([u16; 4], ImageRgba16);
 impl_imbuf_to_image!([f32; 4], ImageRgba32F);
 
-impl ImbufIntoRustImage for imbuf::DynamicImage {
-    type Error = IncompatibleLayoutError;
+impl ImbufTryIntoRustImage for imbuf::DynamicImage {
     fn into_rust_image_dynamic(self) -> Result<image::DynamicImage, IncompatibleLayoutError> {
+        enum Depth {
+            U8,
+            U16,
+            F32,
+        }
         let channels = non_zero_u8(self.len());
         let pixel_elements = self.first().pixel_elements();
         if self.len() != 1 {
@@ -243,15 +252,14 @@ impl ImbufIntoRustImage for imbuf::DynamicImage {
         ) -> Result<image::DynamicImage, IncompatibleLayoutError>
         where
             TP: imbuf::PixelType,
-            imbuf::Image<TP, N>:
-                TryFrom<imbuf::DynamicImage> + ImbufIntoRustImage<Error = std::convert::Infallible>,
+            imbuf::Image<TP, N>: TryFrom<imbuf::DynamicImage> + ImbufIntoRustImage,
         {
             let image =
                 imbuf::Image::<TP, N>::try_from(dynamic).map_err(|_| IncompatibleLayoutError {
                     channels: Some(channels),
                     pixel_elements: Some(pixel_elements),
                 })?;
-            image.into_rust_image_dynamic().map_err(|x| match x {})
+            Ok(image.into_rust_image_dynamic())
         }
 
         match (depth, pixel_elements.get()) {
@@ -273,17 +281,12 @@ impl ImbufIntoRustImage for imbuf::DynamicImage {
     }
 }
 /// The depth of an [`imbuf`] channel, matching the owned conversion arms.
-enum Depth {
-    U8,
-    U16,
-    F32,
-}
 
 fn image_from_raw<P, T>(width: u32, height: u32, buffer: Vec<T>) -> ImageBuffer<P, Vec<T>>
 where
     P: image::Pixel<Subpixel = T>,
 {
-    ImageBuffer::from_raw(width, height, buffer).expect("Incompatible buffer size")
+    ImageBuffer::from_raw(width, height, buffer).expect("There is no conversion which can fail")
 }
 
 fn ref_image<P, TP>(channel: &ImageChannel<TP>) -> ImageBuffer<P, &[TP::Primitive]>
@@ -360,7 +363,7 @@ mod tests {
         let image = Image::<u8, 1>::new_vec(vec![1], NonZeroU32::MIN, NonZeroU32::MIN);
         assert_eq!(
             test_encode(image.as_rust_image_dynamic().unwrap()),
-            test_encode_owned(image.into_rust_image_dynamic().unwrap())
+            test_encode_owned(image.into_rust_image_dynamic())
         );
     }
 

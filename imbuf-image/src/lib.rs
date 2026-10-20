@@ -7,7 +7,8 @@ mod into_imbuf;
 mod ref_image;
 
 pub use from_imbuf::{
-    ImbufAsRustImage, ImbufAsRustImageMut, ImbufIntoRustImage, IncompatibleLayoutError,
+    ImbufAsRustImage, ImbufAsRustImageMut, ImbufIntoRustImage, ImbufTryIntoRustImage,
+    IncompatibleLayoutError,
 };
 pub use into_imbuf::{ImageToImbuf, IntoDynamicImageError, IntoDynamicImageErrorReason};
 pub use ref_image::{DynamicRefImage, DynamicRefImageMut};

@@ -2,7 +2,6 @@
 - Deprecate the `external` module (`image_0_25` integration). It now lives in the separate `imbuf-image` crate, which can be depended on directly.
   - The old API keeps working during migration.
   - `imbuf_image::ImbufAsRustImage::as_rust_image_dynamic` and `ImbufAsRustImageMut::as_rust_image_dynamic_mut` borrow an `imbuf` buffer as a `DynamicRefImage` / `DynamicRefImageMut` without copying.
-  - `imbuf_image::ImbufIntoRustImage::into_rust_image_dynamic` converts an owned `imbuf` image into an owned `image::DynamicImage`.
 - Add `Image<_, N>::first` / `first_mut` to borrow the single `ImageChannel` of all images (checked at compile time in all constructors).
 
 # 0.3.3
