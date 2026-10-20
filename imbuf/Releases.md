@@ -3,9 +3,7 @@
   - The old API keeps working during migration.
   - `imbuf_image::ImbufAsRustImage::as_rust_image_dynamic` and `ImbufAsRustImageMut::as_rust_image_mut` borrow an `imbuf` buffer as a `DynamicRefImage` / `DynamicRefImageMut` without copying.
   - `imbuf_image::ImbufIntoRustImage::into_rust_image` converts an owned `imbuf` image into an owned `image::DynamicImage`.
-- Add `Image<_, 1>::first` / `first_mut` to borrow the single `ImageChannel` of a one-channel image.
-- Add `From<&ImageBuffer<_, &[_]>> for DynamicRefImage` for all supported pixel formats, borrowing the buffer without copying.
-- Rework the `imbuf-opencv` conversions: `ImbufAsOpencv::as_opencv` and `ImbufAsOpencv::as_opencv_mut` borrow an `imbuf` buffer as a `BoxedRef<Mat>` / `BoxedRefMut<Mat>` without copying, and `OpencvIntoImbuf::into_imbuf_dynamic` / `into_imbuf_specific` hand an owned `Mat` to `imbuf` without copying. There is no owned `imbuf`-to-`Mat` conversion, because a `Mat` cannot own an `imbuf` allocation without copying.
+- Add `Image<_, N>::first` / `first_mut` to borrow the single `ImageChannel` of all images (checked at compile time in all constructors).
 
 # 0.3.3
 - Add `ImageChannel<DynamicSize<_>>::new_vec_dynamic`
