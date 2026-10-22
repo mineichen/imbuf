@@ -169,12 +169,19 @@ unsafe fn into_channel<P: PixelTypePrimitive>(
 ) -> ImageChannel<DynamicSize<P>> {
     let ptr = mat.data() as *const P;
     let data = mat.into_raw().cast::<()>();
-    let channel = unsafe {
-        UnsafeImageChannel::new_with_vtable(ptr, width, height, pixel_elements, vtable::<P>(), data)
-    };
+    let channel = UnsafeImageChannel::new_with_vtable(
+        ptr,
+        width,
+        height,
+        pixel_elements,
+        vtable::<P>(),
+        data,
+    );
     // ImageChannel is #[repr(transparent)] over UnsafeImageChannel, and the only
     // wrapping constructor (`from_unsafe_internal`) is pub(crate) in imbuf 0.3
-    unsafe { transmute::<UnsafeImageChannel<P>, ImageChannel<DynamicSize<P>>>(channel) }
+
+    // Safety:
+    unsafe { ImageChannel::from_unsafe(channel) }
 }
 
 fn planar_channel<P: PixelTypePrimitive>(

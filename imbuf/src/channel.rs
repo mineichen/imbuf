@@ -174,16 +174,14 @@ where
     where
         TP::Primitive: Send + Sync,
     {
-        unsafe {
-            Self(UnsafeImageChannel::new_with_vtable(
-                ptr,
-                width,
-                height,
-                TP::PixelSize::default().get(),
-                vtable,
-                data,
-            ))
-        }
+        Self(UnsafeImageChannel::new_with_vtable(
+            ptr,
+            width,
+            height,
+            TP::PixelSize::default().get(),
+            vtable,
+            data,
+        ))
     }
 }
 
@@ -295,8 +293,10 @@ impl<TP: PixelType> From<ImageChannel<TP>> for ImageChannel<DynamicSize<TP::Prim
 
 impl<TP: RuntimePixelType> ImageChannel<TP> {
     /// Create an [`ImageChannel`] from an [`UnsafeImageChannel`] (used internally)
+    ///
+    /// Safety: UnsafeImageChannel must uphold all safety aspects of it's vtable
     #[must_use]
-    pub(crate) fn from_unsafe_internal(unsafe_channel: UnsafeImageChannel<TP::Primitive>) -> Self {
+    pub unsafe fn from_unsafe(unsafe_channel: UnsafeImageChannel<TP::Primitive>) -> Self {
         Self(unsafe_channel)
     }
 
@@ -429,6 +429,9 @@ pub struct ImageChannelVTable<T: 'static> {
 
 /// This is only relevant when implementing a custom storage
 /// T is usually a `PixelTypePrimitive`, but it is not enforced by the type system
+///
+/// In contrast to ImageChannel, UnsafeImageChannel has no guarantee about the
+/// consistency of it's fields.
 #[repr(C)]
 pub struct UnsafeImageChannel<T: 'static> {
     pub ptr: *const T,
@@ -444,10 +447,7 @@ impl<T: 'static> UnsafeImageChannel<T> {
     /// Don't use this method unless you need a custom image.
     ///
     /// Use/provide methods like `new_vec()` and `new_arc()` for safe construction
-    ///
-    /// # Safety
-    /// The vtable must be able to cleanup the fields
-    pub unsafe fn new_with_vtable(
+    pub fn new_with_vtable(
         ptr: *const T,
         width: NonZeroU32,
         height: NonZeroU32,
@@ -465,7 +465,7 @@ impl<T: 'static> UnsafeImageChannel<T> {
         }
     }
 
-    pub(crate) const fn buffer_flat(&self) -> &[T] {
+    pub(crate) const unsafe fn buffer_flat(&self) -> &[T] {
         unsafe { slice::from_raw_parts(self.ptr, self.calc_len_flat()) }
     }
 

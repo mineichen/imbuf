@@ -168,18 +168,18 @@ where
         let vtable =
             <SharedVecFactory<TP::Primitive, CHANNELS> as ChannelFactory<TP::Primitive>>::VTABLE;
 
-        let ptr = base;
+        let unsafe_channel = UnsafeImageChannel::new_with_vtable(
+            base,
+            width,
+            height,
+            TP::PixelSize::default().get(),
+            vtable,
+            metadata_ptr.cast(),
+        );
 
         unsafe {
             base = base.add(start);
-            ImageChannel::from_unsafe_internal(UnsafeImageChannel::new_with_vtable(
-                ptr,
-                width,
-                height,
-                TP::PixelSize::default().get(),
-                vtable,
-                metadata_ptr.cast(),
-            ))
+            ImageChannel::from_unsafe(unsafe_channel)
         }
     })
 }

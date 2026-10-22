@@ -27,16 +27,14 @@ impl<T: 'static> UnsafeImageChannel<T> {
         );
         std::mem::forget(input);
         let vtable = <VecFactory as ChannelFactory<T>>::VTABLE;
-        unsafe {
-            Self::new_with_vtable(
-                ptr,
-                width,
-                height,
-                pixel_elements,
-                vtable,
-                std::ptr::without_provenance_mut(cap),
-            )
-        }
+        Self::new_with_vtable(
+            ptr,
+            width,
+            height,
+            pixel_elements,
+            vtable,
+            std::ptr::without_provenance_mut(cap),
+        )
     }
 }
 

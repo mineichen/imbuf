@@ -8,6 +8,7 @@ use image::{ImageBuffer, Luma, LumaA, Rgb, Rgba};
 /// Unlike [`image::DynamicImage`], this type can borrow the buffer, so
 /// converting from an `imbuf` image never copies.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum DynamicRefImage<'a> {
     ImageLuma8(ImageBuffer<Luma<u8>, &'a [u8]>),
     ImageLuma16(ImageBuffer<Luma<u16>, &'a [u16]>),
@@ -24,6 +25,7 @@ pub enum DynamicRefImage<'a> {
 /// A mutable borrowed view of an [`imbuf`] image as an [`image`]
 /// `DynamicImage`-shaped value.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum DynamicRefImageMut<'a> {
     ImageLuma8(ImageBuffer<Luma<u8>, &'a mut [u8]>),
     ImageLuma16(ImageBuffer<Luma<u16>, &'a mut [u16]>),

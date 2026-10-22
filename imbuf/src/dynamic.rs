@@ -54,6 +54,8 @@ impl DynamicImage {
         rest.all(|x| x == first)
     }
 
+    // Returns the first channel instance mapped plus a iterator of the mapped rest
+    // This allows e.g. `Iterator::fold` without unwrapping
     #[allow(clippy::missing_panics_doc)]
     pub fn mapped_channels<'a, T: 'a, TF>(
         &'a self,

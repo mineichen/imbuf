@@ -30,16 +30,14 @@ where
 
         let ptr = Arc::into_raw(input).cast::<T>();
         let vtable = <ArcFactory as ChannelFactory<T>>::VTABLE;
-        unsafe {
-            Self::new_with_vtable(
-                ptr,
-                width,
-                height,
-                pixel_elements,
-                vtable,
-                std::ptr::without_provenance_mut(len),
-            )
-        }
+        Self::new_with_vtable(
+            ptr,
+            width,
+            height,
+            pixel_elements,
+            vtable,
+            std::ptr::without_provenance_mut(len),
+        )
     }
 }
 
@@ -92,7 +90,8 @@ pub(crate) extern "C" fn clone_slice_into_arc_channel<T: Clone>(
     image: &UnsafeImageChannel<T>,
 ) -> UnsafeImageChannel<T> {
     UnsafeImageChannel::new_arc(
-        Arc::from(image.buffer_flat()),
+        // Safety: Internal image is always valid
+        Arc::from(unsafe { image.buffer_flat() }),
         image.width,
         image.height,
         image.pixel_elements,
