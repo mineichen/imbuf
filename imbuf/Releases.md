@@ -19,6 +19,7 @@
   - Remove `UnsafeImageChannel::new_vec` and `UnsafeImageChannel::new_arc`. Use `DynamicImageChannel::new_vec` or `ImageChannel::new_vec`/`new_arc` instead.
 - Breaking: `ImageChannel::buffer`, `ImageChannel::buffer_flat` and `ImageChannel::buffer_flat_bytes` are no longer `const`. `ImageChannel::buffer_flat_bytes` requires `TP::Primitive: bytemuck::NoUninit`.
 - Breaking: Remove the deprecated `external` module and the `image_0_25` feature. Use the `imbuf-image` crate instead.
+- Breaking: Remove deprecated `RgbImageInterleaved`, `LumaImage`, `RgbaImageInterleaved`, `RgbImagePlanar` and `RgbaImagePlanar`
 - Allow more pixel primitives from std (Support for i8, i16, u32, i32, u64, i64, usize, isize, f64)
 - Fix: `TryFrom<&DynamicImageChannel> for &ImageChannel<TP>` (and `&mut`) bind the lifetime of the result to the input. Before, any lifetime could be returned.
 - Fix: `Image::new_vec_flat` and `ImageChannel::into_vec` deallocated with a wrong layout if the capacity wasn't a multiple of the pixel elements.

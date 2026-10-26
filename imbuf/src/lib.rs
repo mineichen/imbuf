@@ -16,32 +16,6 @@ pub use dynamic::{DynamicImage, DynamicImageChannel, IncompatibleImageError};
 pub use image::{Image, ImageChannels, ImageMut, ImageRef};
 pub use pixel::{PixelType, PixelTypePrimitive};
 
-#[deprecated(
-    since = "0.3.0",
-    note = "Use Image<T, 1> instead... This crate makes no assumption about the intent of channels"
-)]
-pub type LumaImage<T> = Image<T, 1>;
-#[deprecated(
-    since = "0.3.0",
-    note = "Use Image<[T; 3], 1> instead... This crate makes no assumption about the intent of channels"
-)]
-pub type RgbImageInterleaved<T> = Image<[T; 3], 1>;
-#[deprecated(
-    since = "0.3.0",
-    note = "Use Image<[T; 4], 1> instead... This crate makes no assumption about the intent of channels"
-)]
-pub type RgbaImageInterleaved<T> = Image<[T; 4], 1>;
-#[deprecated(
-    since = "0.3.0",
-    note = "Use Image<T, 3> instead... This crate makes no assumption about the intent of channels"
-)]
-pub type RgbImagePlanar<T> = Image<T, 3>;
-#[deprecated(
-    since = "0.3.0",
-    note = "Use Image<T, 4> instead... This crate makes no assumption about the intent of channels"
-)]
-pub type RgbaImagePlanar<T> = Image<T, 4>;
-
 const fn unwrap_usize_to_nonzero_u8(value: usize) -> NonZeroU8 {
     assert!(value <= 255, "usize must be less than 256");
     #[allow(clippy::cast_possible_truncation)]
