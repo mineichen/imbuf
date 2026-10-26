@@ -10,10 +10,12 @@
   outputs = inputs@{ flake-parts, ... }:
     flake-parts.lib.mkFlake { inherit inputs; } {
       systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" "x86_64-darwin" ];
-      perSystem = { system, pkgs, ... }:
+      perSystem = { system, ... }:
         let
-          # pkgs is injected by flake-parts' nixpkgs module, equivalent to
-          # `import nixpkgs { inherit system; }` in the flake-utils variant.
+          pkgs = import inputs.nixpkgs {
+            inherit system;
+            config.allowUnfreePredicate = pkg: builtins.elem (inputs.nixpkgs.lib.getName pkg) [ "claude-code" ];
+          };
           rust = with inputs.fenix.packages.${system}; combine [
             stable.toolchain
           ];
@@ -32,6 +34,16 @@
             pkgs.opencv
             pkgs.pkg-config
           ];
+          commonBuildInputs = [
+            rust
+            pkgs.git
+          ] ++ opencvBuildInputs;
+          greet = ''
+            echo "===================================="
+            echo " Welcome to the deterministic dev shell! "
+            echo "===================================="
+            cargo --version
+          '';
           opencvEnvVars = {
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
               pkgs.llvmPackages.libclang.lib
@@ -52,14 +64,24 @@
             map (dir: "-C link-arg=-Wl,-rpath,${dir}")
               (pkgs.lib.splitString ":" opencvEnvVars.LD_LIBRARY_PATH)
           );
+          policy = pkgs.writeText "policy.json" ''{"default":[{"type":"insecureAcceptAnything"}]}'';
+          containername = "imbuf-isolated-dev";
+          podmanRuntimePath = pkgs.lib.makeBinPath [
+            pkgs.slirp4netns
+          ];
+          podmanRun = "${pkgs.podman}/bin/podman run --rm -it "
+            + "--network=slirp4netns "
+            + "--tmpfs /tmp "
+            + "-v .:/workspace/imbuf:z "
+            + "-e HOME=/root "
+            + "${containername}:latest /bin/entrypoint.sh";
         in
         {
           devShells.default = pkgs.mkShell ({
-            buildInputs = [
-              rust
+            buildInputs = commonBuildInputs ++ [
               pkgs.bashInteractive
               pkgs.cargo-tarpaulin
-            ] ++ opencvBuildInputs;
+            ];
 
             shellHook = ''
               echo "===================================="
@@ -119,6 +141,58 @@
               echo "XML report generated in coverage/cobertura.xml"
               echo ""
               echo "Open coverage/tarpaulin-report.html in your browser to view the report."
+            '');
+          };
+
+          packages.isolated-build = pkgs.dockerTools.buildImage {
+            name = containername;
+            tag = "latest";
+            copyToRoot = pkgs.buildEnv {
+              name = containername;
+              paths = commonBuildInputs ++ [
+                pkgs.bashInteractive
+                pkgs.ripgrep
+                pkgs.git
+                pkgs.opencode
+                pkgs.claude-code
+                pkgs.busybox
+                pkgs.cargo-tarpaulin
+                (pkgs.writeScriptBin "entrypoint.sh" ''
+                  #!${pkgs.bashInteractive}/bin/bash
+                  ${greet}
+                  exec ${pkgs.bashInteractive}/bin/bash
+                '')
+              ];
+              pathsToLink = [ "/bin" "/lib" "/include" "/share" ];
+            };
+            config = {
+              Env = [
+                "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+                "HOME=/root"
+              ] ++ pkgs.lib.mapAttrsToList (name: value: "${name}=${value}") opencvEnvVars;
+              Cmd = [ "/bin/entrypoint.sh" ];
+              WorkingDir = "/workspace/imbuf";
+            };
+          };
+
+          apps.isolated-build = {
+            type = "app";
+            program = toString (pkgs.writeShellScript containername ''
+              export PATH="${podmanRuntimePath}:$PATH"
+              ${pkgs.podman}/bin/podman rmi ${containername} || true
+              ${pkgs.podman}/bin/podman load \
+                --signature-policy ${policy} \
+                --input ${inputs.self.packages.${system}.isolated-build}
+              ${podmanRun}
+            '');
+          };
+
+          apps.isolated-nobuild = {
+            type = "app";
+            program = toString (pkgs.writeShellScript "run-isolated" ''
+              set -euo pipefail
+              export PATH="${podmanRuntimePath}:$PATH"
+              ${podmanRun}
             '');
           };
         };
