@@ -3,120 +3,124 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
+    flake-parts.url = "github:hercules-ci/flake-parts";
     fenix.url = "github:nix-community/fenix";
   };
 
-  outputs = { self, nixpkgs, flake-utils, fenix, ... }:
-    flake-utils.lib.eachDefaultSystem (system:
-      let
-        pkgs = import nixpkgs { inherit system; };
-        rust = with fenix.packages.${system}; combine [
-          stable.toolchain
-        ];
-        rustNightlyWithMiri = with fenix.packages.${system}; combine [
-          (latest.withComponents [
-            "rustc"
-            "cargo"
-            "miri"
-          ])
-        ];
-        # Required to build and run the imbuf-opencv test suite.
-        opencvBuildInputs = [
-          pkgs.stdenv.cc
-          pkgs.llvmPackages.libclang
-          pkgs.cmake
-          pkgs.opencv
-          pkgs.pkg-config
-        ];
-        opencvEnvVars = {
-          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
-            pkgs.llvmPackages.libclang.lib
-            pkgs.opencv
-            pkgs.stdenv.cc.cc.lib
-            pkgs.openssl.out
+  outputs = inputs@{ flake-parts, ... }:
+    flake-parts.lib.mkFlake { inherit inputs; } {
+      systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" "x86_64-darwin" ];
+      perSystem = { system, pkgs, ... }:
+        let
+          # pkgs is injected by flake-parts' nixpkgs module, equivalent to
+          # `import nixpkgs { inherit system; }` in the flake-utils variant.
+          rust = with inputs.fenix.packages.${system}; combine [
+            stable.toolchain
           ];
-          LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-          PKG_CONFIG_PATH = pkgs.lib.makeSearchPath "lib/pkgconfig" [
-            pkgs.glib.dev
-            pkgs.opencv
+          rustNightlyWithMiri = with inputs.fenix.packages.${system}; combine [
+            (latest.withComponents [
+              "rustc"
+              "cargo"
+              "miri"
+            ])
           ];
+          # Required to build and run the imbuf-opencv test suite.
+          opencvBuildInputs = [
+            pkgs.stdenv.cc
+            pkgs.llvmPackages.libclang
+            pkgs.cmake
+            pkgs.opencv
+            pkgs.pkg-config
+          ];
+          opencvEnvVars = {
+            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+              pkgs.llvmPackages.libclang.lib
+              pkgs.opencv
+              pkgs.stdenv.cc.cc.lib
+              pkgs.openssl.out
+            ];
+            LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+            PKG_CONFIG_PATH = pkgs.lib.makeSearchPath "lib/pkgconfig" [
+              pkgs.glib.dev
+              pkgs.opencv
+            ];
+          };
+          envVarAssignments = pkgs.lib.concatMapStringsSep " " (
+            name: value: "${name}=\"${value}\""
+          ) opencvEnvVars;
+          rustRpathFlags = pkgs.lib.concatStringsSep " " (
+            map (dir: "-C link-arg=-Wl,-rpath,${dir}")
+              (pkgs.lib.splitString ":" opencvEnvVars.LD_LIBRARY_PATH)
+          );
+        in
+        {
+          devShells.default = pkgs.mkShell ({
+            buildInputs = [
+              rust
+              pkgs.bashInteractive
+              pkgs.cargo-tarpaulin
+            ] ++ opencvBuildInputs;
+
+            shellHook = ''
+              echo "===================================="
+              echo " Welcome to the deterministic dev shell! "
+              echo "===================================="
+              echo "Rust toolchain:"
+              rustc --version
+              echo "Cargo version:"
+              cargo --version
+              echo "OpenCV version:"
+              pkg-config --modversion opencv4 || echo "opencv not found via pkg-config"
+              echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
+              echo "LIBCLANG_PATH: $LIBCLANG_PATH"
+              echo "PKG_CONFIG_PATH: $PKG_CONFIG_PATH"
+              echo "===================================="
+              echo "Ready to develop! 🦀"
+            '';
+          } // opencvEnvVars // {
+            LD_LIBRARY_PATH = "";
+            RUSTFLAGS = rustRpathFlags;
+            RUSTDOCFLAGS = rustRpathFlags;
+          });
+
+          apps.miri = {
+            type = "app";
+            # Miri cannot execute the OpenCV FFI calls of imbuf-opencv, so it only
+            # covers the pure Rust imbuf crate.
+            program = toString (pkgs.writeShellScript "miri" ''
+              export PATH="${rustNightlyWithMiri}/bin:${pkgs.stdenv.cc}/bin:${pkgs.openssl.out}/bin:$PATH"
+              export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib pkgs.openssl.out ]}"
+              exec ${rustNightlyWithMiri}/bin/cargo miri test -p imbuf-image -p imbuf
+            '');
+          };
+
+          apps.coverage = {
+            type = "app";
+            program = toString (pkgs.writeShellScript "coverage" ''
+              export ${pkgs.lib.concatStringsSep " " envVarAssignments}
+              set -e
+
+              # Create coverage directory
+              mkdir -p coverage
+
+              # Run tests with coverage
+              echo "Running tests with coverage..."
+              ${pkgs.cargo-tarpaulin}/bin/cargo-tarpaulin \
+                --out Html \
+                --out Xml \
+                --output-dir target/coverage \
+                --exclude-files 'tests/*' \
+                --exclude-files 'target/*' \
+                --timeout 120 \
+                --all-features
+
+              echo ""
+              echo "Coverage report generated in coverage/tarpaulin-report.html"
+              echo "XML report generated in coverage/cobertura.xml"
+              echo ""
+              echo "Open coverage/tarpaulin-report.html in your browser to view the report."
+            '');
+          };
         };
-        envVarAssignments = pkgs.lib.concatMapStringsSep " " (
-          name: value: "${name}=\"${value}\""
-        ) opencvEnvVars;
-        rustRpathFlags = pkgs.lib.concatStringsSep " " (
-          map (dir: "-C link-arg=-Wl,-rpath,${dir}")
-            (pkgs.lib.splitString ":" opencvEnvVars.LD_LIBRARY_PATH)
-        );
-      in
-      {
-        devShells.default = pkgs.mkShell ({
-          buildInputs = [
-            rust
-            pkgs.bashInteractive
-            pkgs.cargo-tarpaulin
-          ] ++ opencvBuildInputs;
-
-          shellHook = ''
-            echo "===================================="
-            echo " Welcome to the deterministic dev shell! "
-            echo "===================================="
-            echo "Rust toolchain:"
-            rustc --version
-            echo "Cargo version:"
-            cargo --version
-            echo "OpenCV version:"
-            pkg-config --modversion opencv4 || echo "opencv not found via pkg-config"
-            echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
-            echo "LIBCLANG_PATH: $LIBCLANG_PATH"
-            echo "PKG_CONFIG_PATH: $PKG_CONFIG_PATH"
-            echo "===================================="
-            echo "Ready to develop! 🦀"
-          '';
-        } // opencvEnvVars // {
-          LD_LIBRARY_PATH = "";
-          RUSTFLAGS = rustRpathFlags;
-          RUSTDOCFLAGS = rustRpathFlags;
-        });
-
-        apps.miri = {
-          type = "app";
-          # Miri cannot execute the OpenCV FFI calls of imbuf-opencv, so it only
-          # covers the pure Rust imbuf crate.
-          program = toString (pkgs.writeShellScript "miri" ''
-            export PATH="${rustNightlyWithMiri}/bin:${pkgs.openssl.out}/bin:$PATH"
-            export LD_LIBRARY_PATH="${pkgs.openssl.out}/lib"
-            exec ${rustNightlyWithMiri}/bin/cargo miri test -p imbuf-image -p imbuf
-          '');
-        };
-
-        apps.coverage = {
-          type = "app";
-          program = toString (pkgs.writeShellScript "coverage" ''
-            export ${pkgs.lib.concatStringsSep " " envVarAssignments}
-            set -e
-
-            # Create coverage directory
-            mkdir -p coverage
-
-            # Run tests with coverage
-            echo "Running tests with coverage..."
-            ${pkgs.cargo-tarpaulin}/bin/cargo-tarpaulin \
-              --out Html \
-              --out Xml \
-              --output-dir target/coverage \
-              --exclude-files 'tests/*' \
-              --exclude-files 'target/*' \
-              --timeout 120 \
-              --all-features
-
-            echo ""
-            echo "Coverage report generated in coverage/tarpaulin-report.html"
-            echo "XML report generated in coverage/cobertura.xml"
-            echo ""
-            echo "Open coverage/tarpaulin-report.html in your browser to view the report."
-          '');
-        };
-      });
+    };
 }
