@@ -13,7 +13,4 @@ crates are tracked in `RELEASE_CHANGES.md` instead.
 - (Candidate) Replace the `Error = ()` of the
   `TryFrom<&DynamicImageChannel> for &ImageChannel<TP>` family with a typed
   error. Decision deferred.
-- Big change:  &ImageChannels in other structures like Image are unflexible.
-  Because instances have to live somewhere to refer to, this is not possible ad-hoc
-  Because of this, we cannot create a Ref-Channel over e.g. a &image::DynamicImage... 
 - Remove `impl DerefMut for DynamicImage` as it allows violating the never len=0 invariant

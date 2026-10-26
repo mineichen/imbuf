@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-    DynamicImageChannel, PixelTypePrimitive,
+    DynamicImageChannel, GenericDynamicImageChannel, PixelTypePrimitive,
     channel::{
         ChannelFactory, ImageChannelVTable, UnsafeImageChannel, calc_pixel_len_flat, primitive_size,
     },
@@ -54,12 +54,14 @@ impl<T: PixelTypePrimitive> ChannelFactory<T> for VecFactory {
     };
 }
 
-unsafe extern "C-unwind" fn make_mut(_image: &mut DynamicImageChannel) {
+unsafe extern "C-unwind" fn make_mut(_image: &mut GenericDynamicImageChannel<'_>) {
     // Do nothing, as the Vec is never shared (clone copies it)
 }
 
-pub(crate) unsafe extern "C-unwind" fn drop_vec_channel<T>(image: &mut DynamicImageChannel) {
-    let raw = DynamicImageChannel::get_unsafe(image);
+pub(crate) unsafe extern "C-unwind" fn drop_vec_channel<T>(
+    image: &mut GenericDynamicImageChannel<'_>,
+) {
+    let raw = GenericDynamicImageChannel::get_unsafe(image);
     drop(unsafe {
         Vec::from_raw_parts(
             raw.ptr.cast::<T>().cast_mut(),

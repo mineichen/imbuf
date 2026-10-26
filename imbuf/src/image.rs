@@ -1,5 +1,4 @@
 use std::{
-    borrow::BorrowMut,
     fmt::{self, Debug, Formatter},
     num::NonZeroU32,
     sync::Arc,
@@ -7,28 +6,32 @@ use std::{
 
 use crate::{
     IncompatibleImageError,
-    channel::{BorrowableImageChannel, ImageChannel, calc_pixel_len_flat},
+    channel::{GenericImageChannel, ImageChannel, calc_pixel_len_flat},
     dynamic::IncompatibleImageErrorReason,
     pixel::{PixelType, PixelTypePrimitive},
     unwrap_usize_to_nonzero_u8,
 };
 
-pub type Image<T, const CHANNELS: usize> = ImageChannels<[ImageChannel<T>; CHANNELS]>;
-pub type ImageRef<'a, T, const CHANNELS: usize> = ImageChannels<[&'a ImageChannel<T>; CHANNELS]>;
-pub type ImageMut<'a, T, const CHANNELS: usize> =
-    ImageChannels<[&'a mut ImageChannel<T>; CHANNELS]>;
+/// [`GenericImage`] which owns its buffers (or shares them with other owners)
+pub type Image<T, const CHANNELS: usize> = GenericImage<'static, T, CHANNELS>;
+/// [`GenericImage`] whose buffers might be borrowed for `'a`
+pub type ImageRef<'a, T, const CHANNELS: usize> = GenericImage<'a, T, CHANNELS>;
 
-/// Represents a image, where all channels share the same width, height. You usually want to use its typedef versions [`Image`], [`ImageRef`], [`ImageMut`] instead.
+/// Represents a image, where all channels share the same width, height. You usually want to use
+/// its typedef versions [`Image`] (owned) and [`ImageRef`] (borrowed) instead.
+///
+/// The buffers are valid for the lifetime `'a`, see [`GenericImageChannel`]. Borrowed images are
+/// created with [`GenericImage::new_slice`], [`GenericImage::view`], `TryFrom<&GenericDynamicImage>`
+/// and their `mut` counterparts.
 #[derive(Clone)]
 #[repr(transparent)]
-pub struct ImageChannels<T>(T);
+pub struct GenericImage<'a, T: PixelType, const CHANNELS: usize>(
+    [GenericImageChannel<'a, T>; CHANNELS],
+);
 
-impl<T: BorrowableImageChannel, const CHANNELS: usize> PartialEq for ImageChannels<[T; CHANNELS]> {
+impl<T: PixelType, const CHANNELS: usize> PartialEq for GenericImage<'_, T, CHANNELS> {
     fn eq(&self, other: &Self) -> bool {
-        self.0
-            .iter()
-            .zip(other.0.iter())
-            .all(|(a, b)| a.borrow() == b.borrow())
+        self.0.iter().zip(other.0.iter()).all(|(a, b)| a == b)
     }
 }
 
@@ -95,35 +98,7 @@ impl<const CHANNELS: usize, T: PixelType> Image<T, CHANNELS> {
     }
 
     #[must_use]
-    pub fn into_channels(self) -> [ImageChannel<T>; CHANNELS] {
-        self.0
-    }
-
-    #[must_use]
-    pub fn into_vec(mut self) -> Vec<T>
-    where
-        T: Clone,
-    {
-        if CHANNELS == 1 {
-            // For single channel, use ImageChannel::into_vec which preserves pointer reuse
-            // SAFETY: When CHANNELS == 1, we know the array has exactly one element
-            let ch_ptr = self.0.as_mut_ptr();
-            std::mem::forget(self);
-            let channel = unsafe { std::ptr::read(ch_ptr) };
-
-            channel.into_vec()
-        } else {
-            // For multiple channels, concatenate them
-            let mut result = Vec::with_capacity(self.len_per_channel() * CHANNELS);
-            for channel in self.0 {
-                result.extend_from_slice(channel.buffer());
-            }
-            result
-        }
-    }
-
-    #[must_use]
-    pub fn from_interleaved(i: &Image<[T; CHANNELS], 1>) -> Self
+    pub fn from_interleaved(i: &GenericImage<'_, [T; CHANNELS], 1>) -> Self
     where
         T: PixelTypePrimitive + Copy,
     {
@@ -177,74 +152,146 @@ impl<const CHANNELS: usize, T: PixelType> Image<T, CHANNELS> {
     }
 }
 
-impl<T: BorrowableImageChannel + BorrowMut<ImageChannel<T::Pixel>>, const CHANNELS: usize>
-    ImageChannels<[T; CHANNELS]>
-{
-    #[allow(clippy::missing_panics_doc)]
-    pub fn make_mut(&mut self) -> [&mut [T::Pixel]; CHANNELS] {
-        let mut iter = self.0.iter_mut();
-        std::array::from_fn(|_| iter.next().unwrap().borrow_mut().make_mut())
+#[allow(clippy::len_without_is_empty)]
+impl<'a, T: PixelType, const CHANNELS: usize> GenericImage<'a, T, CHANNELS> {
+    /// Borrows the planar `input` (all pixels of the first channel, then the second...) without
+    /// copying. Mutable access (e.g. [`GenericImage::make_mut`]) copies the buffers, `input` stays
+    /// unchanged.
+    ///
+    /// # Panics
+    /// Panics if the buffer size is not compatible with the width, height and channel count.
+    #[must_use]
+    pub fn new_slice(input: &'a [T], width: NonZeroU32, height: NonZeroU32) -> Self {
+        let mut chunks = input.chunks_exact(Self::slice_chunk_len(input.len(), width, height));
+        Self(std::array::from_fn(|_| {
+            let chunk = chunks.next().expect("Length is checked");
+            GenericImageChannel::new_slice(chunk, width, height)
+        }))
     }
-}
-impl<T: BorrowableImageChannel, const CHANNELS: usize> ImageChannels<[T; CHANNELS]> {
+
+    /// Mutably borrows the planar `input` without copying. Mutable access
+    /// (e.g. [`GenericImage::make_mut`]) writes into `input`. Clones copy the buffers.
+    ///
+    /// # Panics
+    /// Panics if the buffer size is not compatible with the width, height and channel count.
+    #[must_use]
+    pub fn new_slice_mut(input: &'a mut [T], width: NonZeroU32, height: NonZeroU32) -> Self {
+        let chunk_len = Self::slice_chunk_len(input.len(), width, height);
+        let mut chunks = input.chunks_exact_mut(chunk_len);
+        Self(std::array::from_fn(|_| {
+            let chunk = chunks.next().expect("Length is checked");
+            GenericImageChannel::new_slice_mut(chunk, width, height)
+        }))
+    }
+
+    fn slice_chunk_len(len: usize, width: NonZeroU32, height: NonZeroU32) -> usize {
+        let channels = const { unwrap_usize_to_nonzero_u8(CHANNELS) };
+        assert_eq!(
+            len,
+            calc_pixel_len_flat(width, height, channels),
+            "Incompatible Buffer-Size"
+        );
+        len / CHANNELS
+    }
+
+    /// Borrows all channels without copying the buffers, see [`GenericImageChannel::view`]
+    #[must_use]
+    pub fn view(&self) -> GenericImage<'_, T, CHANNELS> {
+        GenericImage(self.0.each_ref().map(GenericImageChannel::view))
+    }
+
+    /// Mutably borrows all channels without copying the buffers, see [`GenericImageChannel::view_mut`]
+    #[must_use]
+    pub fn view_mut(&mut self) -> GenericImage<'_, T, CHANNELS> {
+        GenericImage(self.0.each_mut().map(GenericImageChannel::view_mut))
+    }
+
+    /// The caller has to make sure, that all channels have the same dimensions
+    pub(crate) const fn from_channels_unchecked(
+        channels: [GenericImageChannel<'a, T>; CHANNELS],
+    ) -> Self {
+        Self(channels)
+    }
+
+    #[must_use]
+    pub fn into_channels(self) -> [GenericImageChannel<'a, T>; CHANNELS] {
+        self.0
+    }
+
+    #[must_use]
+    #[allow(clippy::missing_panics_doc)]
+    pub fn into_vec(self) -> Vec<T> {
+        if CHANNELS == 1 {
+            // For single channel, use ImageChannel::into_vec which preserves pointer reuse
+            let channel = self.0.into_iter().next().expect("CHANNELS == 1");
+            channel.into_vec()
+        } else {
+            // For multiple channels, concatenate them
+            let mut result = Vec::with_capacity(self.len_per_channel() * CHANNELS);
+            for channel in self.0 {
+                result.extend_from_slice(channel.buffer());
+            }
+            result
+        }
+    }
+
+    #[allow(clippy::missing_panics_doc)]
+    pub fn make_mut(&mut self) -> [&mut [T]; CHANNELS] {
+        let mut iter = self.0.iter_mut();
+        std::array::from_fn(|_| iter.next().unwrap().make_mut())
+    }
+
     #[must_use]
     pub fn width(&self) -> NonZeroU32 {
         // All channels have the same height (validated at construction)
         // CHANNELS is always > 0
-        self.0[0].borrow().width()
+        self.0[0].width()
     }
 
     #[must_use]
     pub fn height(&self) -> NonZeroU32 {
         // All channels have the same height (validated at construction)
         // CHANNELS is always > 0
-        self.0[0].borrow().height()
+        self.0[0].height()
     }
 
     #[must_use]
     pub fn dimensions(&self) -> (NonZeroU32, NonZeroU32) {
         // All channels have the same height (validated at construction)
         // CHANNELS is always > 0
-        self.0[0].borrow().dimensions()
+        self.0[0].dimensions()
     }
 
     #[must_use]
     pub fn dimensions_zeroable(&self) -> (u32, u32) {
-        self.0[0].borrow().dimensions_zeroable()
+        self.0[0].dimensions_zeroable()
     }
 
     /// Returns the number of pixels in each image channel
     #[must_use]
     pub fn len_per_channel(&self) -> usize {
-        self.0[0].borrow().len()
+        self.0[0].len()
     }
 
     #[must_use]
     pub fn len_per_channel_flat(&self) -> usize {
-        self.0[0].borrow().len_flat()
+        self.0[0].len_flat()
     }
 
     #[must_use]
-    pub fn buffers(&self) -> [&[T::Pixel]; CHANNELS] {
-        let mut uninit = [&[] as &[T::Pixel]; CHANNELS];
-        let mut i = 0;
-        while i < CHANNELS {
-            uninit[i] = self.0[i].borrow().buffer();
-            i += 1;
-        }
-
-        uninit
+    pub fn buffers(&self) -> [&[T]; CHANNELS] {
+        self.0.each_ref().map(GenericImageChannel::buffer)
     }
 
-    /// Borrows the single channel of a one-channel image.
+    /// Borrows the first channel (the single channel of a one-channel image).
     #[must_use]
-    pub fn first(&self) -> &T {
+    pub fn first(&self) -> &GenericImageChannel<'a, T> {
         &self.0[0]
     }
 
-    /// Mutably borrows the single channel of a one-channel image.
+    /// Mutably borrows the first channel (the single channel of a one-channel image).
     #[must_use]
-    pub fn first_mut(&mut self) -> &mut T {
+    pub fn first_mut(&mut self) -> &mut GenericImageChannel<'a, T> {
         &mut self.0[0]
     }
 }
@@ -253,44 +300,36 @@ impl<T> Image<T, 1>
 where
     T: PixelType,
 {
-    pub fn new_arc(input: Arc<[T]>, width: NonZeroU32, height: NonZeroU32) -> Self
-    where
-        T::Primitive: Clone,
-    {
+    pub fn new_arc(input: Arc<[T]>, width: NonZeroU32, height: NonZeroU32) -> Self {
         let channel = ImageChannel::new_arc(input, width, height);
         Self([channel])
     }
+}
 
+impl<'a, T: PixelType> GenericImage<'a, T, 1> {
     #[must_use]
-    pub fn from_channel(ch: ImageChannel<T>) -> Self {
+    pub fn from_channel(ch: GenericImageChannel<'a, T>) -> Self {
         Self([ch])
     }
-}
 
-impl<T: BorrowableImageChannel> ImageChannels<[T; 1]> {
     #[must_use]
-    pub fn buffer(&self) -> &[T::Pixel] {
-        self.0[0].borrow().buffer()
+    pub fn buffer(&self) -> &[T] {
+        self.0[0].buffer()
     }
 
     #[must_use]
-    pub fn buffer_flat(&self) -> &[<T::Pixel as PixelType>::Primitive] {
-        self.0[0].borrow().buffer_flat()
+    pub fn buffer_flat(&self) -> &[T::Primitive] {
+        self.0[0].buffer_flat()
     }
-}
 
-impl<T> ImageChannels<[T; 1]>
-where
-    T: BorrowableImageChannel + std::borrow::BorrowMut<ImageChannel<T::Pixel>>,
-{
-    pub fn buffer_flat_mut(&mut self) -> &mut [<T::Pixel as PixelType>::Primitive] {
-        self.0[0].borrow_mut().primitive_make_mut()
+    pub fn buffer_flat_mut(&mut self) -> &mut [T::Primitive] {
+        self.0[0].primitive_make_mut()
     }
 }
 
 impl<const PIXEL_ELEMENTS: usize, T: PixelTypePrimitive> Image<[T; PIXEL_ELEMENTS], 1> {
     #[must_use]
-    pub fn from_planar_image<const CHANNELS: usize>(i: &Image<T, CHANNELS>) -> Self
+    pub fn from_planar_image<const CHANNELS: usize>(i: &GenericImage<'_, T, CHANNELS>) -> Self
     where
         T: Copy,
     {
@@ -373,7 +412,7 @@ impl<const PIXEL_ELEMENTS: usize, T: PixelTypePrimitive> Image<[T; PIXEL_ELEMENT
     }
 }
 
-impl<T: BorrowableImageChannel, const CHANNELS: usize> Debug for ImageChannels<[T; CHANNELS]> {
+impl<T: PixelType, const CHANNELS: usize> Debug for GenericImage<'_, T, CHANNELS> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("Image")
             .field("width", &self.width())
@@ -384,32 +423,40 @@ impl<T: BorrowableImageChannel, const CHANNELS: usize> Debug for ImageChannels<[
     }
 }
 
-impl<T: BorrowableImageChannel, const CHANNELS: usize> TryFrom<[T; CHANNELS]>
-    for ImageChannels<[T; CHANNELS]>
+/// Fails with `MixedImageSizes`, if not all dimensions are equal
+pub(crate) fn check_dimensions(
+    mut dimensions: impl Iterator<Item = (NonZeroU32, NonZeroU32)>,
+) -> Result<(), IncompatibleImageErrorReason> {
+    let Some(a) = dimensions.next() else {
+        return Ok(());
+    };
+    match dimensions.find(|b| a != *b) {
+        Some(b) => Err(IncompatibleImageErrorReason::MixedImageSizes { a, b }),
+        None => Ok(()),
+    }
+}
+
+impl<'a, T: PixelType, const CHANNELS: usize> TryFrom<[GenericImageChannel<'a, T>; CHANNELS]>
+    for GenericImage<'a, T, CHANNELS>
 {
-    type Error = IncompatibleImageError<[T; CHANNELS]>;
-    fn try_from(channels: [T; CHANNELS]) -> Result<Self, Self::Error> {
+    type Error = IncompatibleImageError<[GenericImageChannel<'a, T>; CHANNELS]>;
+    fn try_from(channels: [GenericImageChannel<'a, T>; CHANNELS]) -> Result<Self, Self::Error> {
         let _assert_not_empty = const { unwrap_usize_to_nonzero_u8(CHANNELS) };
 
-        let mut iter = channels.iter().map(|x| x.borrow().dimensions());
-        let a = iter
-            .next()
-            .expect("Checked at comptime via _assert_not_empty");
-        if let Some(b) = iter.find(|x| a != *x) {
-            Err(IncompatibleImageError {
+        match check_dimensions(channels.iter().map(GenericImageChannel::dimensions)) {
+            Ok(()) => Ok(Self(channels)),
+            Err(reason) => Err(IncompatibleImageError {
                 image: channels,
-                reason: IncompatibleImageErrorReason::MixedImageSizes { a, b },
-            })
-        } else {
-            Ok(Self(channels))
+                reason,
+            }),
         }
     }
 }
 
-impl<T: BorrowableImageChannel, const CHANNELS: usize> From<ImageChannels<[T; CHANNELS]>>
-    for [T; CHANNELS]
+impl<'a, T: PixelType, const CHANNELS: usize> From<GenericImage<'a, T, CHANNELS>>
+    for [GenericImageChannel<'a, T>; CHANNELS]
 {
-    fn from(value: ImageChannels<[T; CHANNELS]>) -> Self {
+    fn from(value: GenericImage<'a, T, CHANNELS>) -> Self {
         value.0
     }
 }
@@ -419,6 +466,9 @@ mod tests {
     use std::num::NonZeroU32;
 
     use super::*;
+
+    const NZ_1: NonZeroU32 = NonZeroU32::MIN;
+    const NZ_2: NonZeroU32 = NonZeroU32::new(2).unwrap();
 
     #[test]
     fn first_channel_access() {
@@ -433,12 +483,104 @@ mod tests {
     fn create_image_from_borrowed_channels() {
         let size = 2.try_into().unwrap();
         let channel = ImageChannel::<u8>::new_vec(vec![0u8, 64u8, 128u8, 192u8], size, size);
-        let image = ImageRef::try_from([&channel]).unwrap();
+        let image = ImageRef::try_from([channel.view()]).unwrap();
         assert_eq!(image.buffer(), &[0u8, 64u8, 128u8, 192u8]);
+        assert_eq!(image.buffer().as_ptr(), channel.buffer().as_ptr());
         assert_eq!(image.dimensions(), (size, size));
         assert_eq!(image.len_per_channel(), 4);
         assert_eq!(image.len_per_channel_flat(), 4);
         assert_eq!(image.buffers(), [[0u8, 64u8, 128u8, 192u8]]);
+    }
+
+    #[test]
+    fn create_image_from_borrowed_channels_with_different_dimensions() {
+        let one = NonZeroU32::MIN;
+        let two = NonZeroU32::new(2).unwrap();
+        let data = [1u8, 2, 3];
+        let a = GenericImageChannel::new_slice(&data[..1], one, one);
+        let b = GenericImageChannel::new_slice(&data[1..], two, one);
+        let err = ImageRef::try_from([a, b]).unwrap_err();
+        assert_eq!(err.image[1].buffer(), &[2, 3]);
+    }
+
+    #[test]
+    fn new_slice_borrows_planar_buffer() {
+        let two = NonZeroU32::new(2).unwrap();
+        let data = [1u8, 2, 3, 4];
+        let mut image = ImageRef::<u8, 2>::new_slice(&data, two, NonZeroU32::MIN);
+        assert_eq!(image.buffers(), [[1, 2], [3, 4]]);
+        assert_eq!(image.buffers()[1].as_ptr(), data[2..].as_ptr());
+
+        let [_, second] = image.make_mut();
+        second[0] = 5;
+        assert_eq!(image.buffers(), [[1, 2], [5, 4]]);
+        assert_eq!(data, [1, 2, 3, 4], "The borrowed buffer is copied on write");
+    }
+
+    #[test]
+    fn new_slice_mut_writes_into_planar_buffer() {
+        let two = NonZeroU32::new(2).unwrap();
+        let mut data = [[1u8, 2], [3, 4]];
+        let mut image = ImageRef::<[u8; 2], 1>::new_slice_mut(&mut data, two, NonZeroU32::MIN);
+        image.buffer_flat_mut()[3] = 5;
+        let clone = image.clone();
+        image.make_mut()[0][0][0] = 6;
+        assert_eq!(clone.buffer(), &[[1, 2], [3, 5]], "Clones copy the buffer");
+        drop((image, clone));
+        assert_eq!(data, [[6, 2], [3, 5]]);
+    }
+
+    #[test]
+    #[should_panic(expected = "Incompatible Buffer-Size")]
+    fn new_slice_with_wrong_size_panics() {
+        let _ = ImageRef::<u8, 2>::new_slice(&[1, 2, 3], NonZeroU32::MIN, NonZeroU32::MIN);
+    }
+
+    #[test]
+    fn view_of_owned_image() {
+        let two = NonZeroU32::new(2).unwrap();
+        let mut image = Image::<u8, 2>::new_vec(vec![1, 2, 3, 4], two, NonZeroU32::MIN);
+        let ptr = image.buffers()[1].as_ptr();
+        {
+            let mut view = image.view();
+            assert_eq!(view.buffers()[1].as_ptr(), ptr);
+            view.make_mut()[1][0] = 5;
+            assert_eq!(view.buffers(), [[1, 2], [5, 4]]);
+        }
+        assert_eq!(image.buffers(), [[1, 2], [3, 4]]);
+        {
+            let mut view = image.view_mut();
+            view.make_mut()[1][0] = 5;
+            assert_eq!(view.buffers()[1].as_ptr(), ptr);
+        }
+        assert_eq!(image.buffers(), [[1, 2], [5, 4]]);
+    }
+
+    #[test]
+    fn view_of_view() {
+        let mut data = [1u8, 2];
+        let mut image = ImageRef::<u8, 1>::new_slice_mut(
+            &mut data,
+            NonZeroU32::MIN,
+            NonZeroU32::new(2).unwrap(),
+        );
+        image.view_mut().view_mut().buffer_flat_mut()[1] = 3;
+        assert_eq!(image.view().view().buffer(), &[1, 3]);
+        drop(image);
+        assert_eq!(data, [1, 3]);
+    }
+
+    /// Owned images can be used where borrowed images are expected
+    #[test]
+    fn image_is_covariant() {
+        fn shorten<'a>(image: Image<u8, 1>) -> ImageRef<'a, u8, 1> {
+            image
+        }
+        let image = Image::<u8, 1>::new_vec(vec![1], NonZeroU32::MIN, NonZeroU32::MIN);
+        let data = [1u8];
+        let borrowed = ImageRef::<u8, 1>::new_slice(&data, NonZeroU32::MIN, NonZeroU32::MIN);
+        assert_eq!(shorten(image.clone()), borrowed);
+        assert_eq!(borrowed, image);
     }
 
     #[test]

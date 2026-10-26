@@ -34,7 +34,7 @@ pub trait ImageIntoImbuf {
     fn into_imbuf_dynamic(self) -> Result<imbuf::DynamicImage, IntoImbufError>;
 
     /// # Errors
-    /// Fails for the same reasons as [`ImbufIntoImage::into_imbuf_dynamic`], or if the
+    /// Fails for the same reasons as [`ImageIntoImbuf::into_imbuf_dynamic`], or if the
     /// layout does not match the requested [`imbuf::Image`] type.
     fn into_imbuf_specific<TP, const CHANNELS: usize>(
         self,
