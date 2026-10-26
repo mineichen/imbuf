@@ -9,7 +9,7 @@ use crate::{
     IncompatibleImageError,
     channel::{BorrowableImageChannel, ImageChannel, calc_pixel_len_flat},
     dynamic::IncompatibleImageErrorReason,
-    pixel::{PixelType, PixelTypePrimitive, RuntimePixelType},
+    pixel::{PixelType, PixelTypePrimitive},
     unwrap_usize_to_nonzero_u8,
 };
 
@@ -43,6 +43,10 @@ impl<const CHANNELS: usize, T: PixelType> Image<T, CHANNELS> {
     {
         let pixel_elements = T::ELEMENTS.get() as usize;
         assert_eq!(input.len() % pixel_elements, 0, "Incompatible Buffer-Size");
+        if !input.capacity().is_multiple_of(pixel_elements) {
+            // Vec<T> cannot represent the allocation. Boxed slices have an exact capacity.
+            input = input.into_boxed_slice().into_vec();
+        }
 
         let cap = input.capacity() / pixel_elements;
         let len = input.len() / pixel_elements;
@@ -270,7 +274,7 @@ impl<T: BorrowableImageChannel> ImageChannels<[T; 1]> {
     }
 
     #[must_use]
-    pub fn buffer_flat(&self) -> &[<T::Pixel as RuntimePixelType>::Primitive] {
+    pub fn buffer_flat(&self) -> &[<T::Pixel as PixelType>::Primitive] {
         self.0[0].borrow().buffer_flat()
     }
 }
@@ -279,7 +283,7 @@ impl<T> ImageChannels<[T; 1]>
 where
     T: BorrowableImageChannel + std::borrow::BorrowMut<ImageChannel<T::Pixel>>,
 {
-    pub fn buffer_flat_mut(&mut self) -> &mut [<T::Pixel as RuntimePixelType>::Primitive] {
+    pub fn buffer_flat_mut(&mut self) -> &mut [<T::Pixel as PixelType>::Primitive] {
         self.0[0].borrow_mut().primitive_make_mut()
     }
 }

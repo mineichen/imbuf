@@ -52,6 +52,25 @@
               pkgs.openssl.out
             ];
             LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+            # The unwrapped libclang used by the opencv binding generator doesn't know
+            # the include paths of the nix toolchain ('type_traits' file not found).
+            OPENCV_CLANG_ARGS = pkgs.lib.concatStringsSep " " (
+              let
+                gcc = pkgs.stdenv.cc.cc;
+                cxxInclude = "${gcc}/include/c++/${gcc.version}";
+                clangMajor = pkgs.lib.versions.major pkgs.llvmPackages.libclang.version;
+              in
+              pkgs.lib.optionals pkgs.stdenv.cc.isGNU [
+                "-isystem ${cxxInclude}"
+                "-isystem ${cxxInclude}/${pkgs.stdenv.hostPlatform.config}"
+              ]
+              ++ [
+                "-isystem ${pkgs.llvmPackages.libclang.lib}/lib/clang/${clangMajor}/include"
+              ]
+              ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+                "-idirafter ${pkgs.stdenv.cc.libc.dev}/include"
+              ]
+            );
             PKG_CONFIG_PATH = pkgs.lib.makeSearchPath "lib/pkgconfig" [
               pkgs.glib.dev
               pkgs.opencv

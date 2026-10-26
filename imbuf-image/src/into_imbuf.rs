@@ -164,7 +164,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use imbuf::{DynamicImageChannel, Image};
+    use imbuf::Image;
 
     use super::*;
 
@@ -177,10 +177,8 @@ mod tests {
         };
 
         let dynamic_image = image.into_imbuf_dynamic().unwrap();
-        let DynamicImageChannel::U8(channel) = dynamic_image.first() else {
-            panic!("expected U8");
-        };
-        let channel = channel
+        let channel = dynamic_image
+            .first()
             .try_cast::<u8>()
             .expect("expected one byte per pixel");
 

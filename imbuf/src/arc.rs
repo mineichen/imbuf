@@ -1,21 +1,26 @@
 use std::{
     mem::ManuallyDrop,
     num::{NonZeroU8, NonZeroU32},
+    ptr,
     sync::Arc,
 };
 
-use crate::channel::{ChannelFactory, ImageChannelVTable, UnsafeImageChannel, calc_pixel_len_flat};
+use crate::{
+    DynamicImageChannel, PixelTypePrimitive,
+    channel::{
+        ChannelFactory, ImageChannelVTable, UnsafeImageChannel, calc_pixel_len_flat, primitive_size,
+    },
+};
 
 struct ArcFactory;
 
-impl<T> UnsafeImageChannel<T>
-where
-    T: Clone + 'static,
-{
-    #[must_use]
+impl DynamicImageChannel {
+    /// In contrast to the public constructors, `T` doesn't have to be `Pod`. Don't expose the
+    /// result as `DynamicImageChannel`, unless `T` is `Pod`
+    ///
     /// # Panics
-    /// Panics if the buffer size is not compatible with the `width`, `height` and `pixel_elements`.
-    pub fn new_arc(
+    /// Panics if the buffer size is not compatible with the width, height and `pixel_elements`.
+    pub(crate) fn from_arc<T: PixelTypePrimitive>(
         input: Arc<[T]>,
         width: NonZeroU32,
         height: NonZeroU32,
@@ -28,72 +33,72 @@ where
             "Incompatible Buffer-Size"
         );
 
-        let ptr = Arc::into_raw(input).cast::<T>();
-        let vtable = <ArcFactory as ChannelFactory<T>>::VTABLE;
-        Self::new_with_vtable(
+        let ptr = Arc::into_raw(input).cast::<u8>();
+        let unsafe_ch = UnsafeImageChannel::new_with_vtable(
             ptr,
             width,
             height,
             pixel_elements,
-            vtable,
-            std::ptr::without_provenance_mut(len),
-        )
+            <ArcFactory as ChannelFactory<T>>::VTABLE,
+            ptr::without_provenance_mut(len),
+        );
+        unsafe { DynamicImageChannel::from_unsafe(unsafe_ch) }
     }
 }
 
-impl<T: 'static + Clone> ChannelFactory<T> for ArcFactory {
-    const VTABLE: &'static ImageChannelVTable<T> = {
-        unsafe extern "C" fn make_mut<T: Clone>(image: &mut UnsafeImageChannel<T>) {
-            let mut arc = ManuallyDrop::new(unsafe {
-                let ptr = std::ptr::slice_from_raw_parts(image.ptr, image.data as usize);
-                Arc::<[T]>::from_raw(ptr)
-            });
+/// Borrows the `Arc` of a channel created by `from_arc` without taking ownership
+unsafe fn arc_view<T>(image: &DynamicImageChannel) -> ManuallyDrop<Arc<[T]>> {
+    let raw = DynamicImageChannel::get_unsafe(image);
+    let ptr = ptr::slice_from_raw_parts(raw.ptr.cast::<T>(), raw.data as usize);
+    ManuallyDrop::new(unsafe { Arc::from_raw(ptr) })
+}
+
+impl<T: PixelTypePrimitive> ChannelFactory<T> for ArcFactory {
+    const VTABLE: &'static ImageChannelVTable = {
+        unsafe extern "C-unwind" fn make_mut<T: Clone>(image: &mut DynamicImageChannel) {
+            let mut arc = unsafe { arc_view::<T>(image) };
 
             if Arc::get_mut(&mut arc).is_none() {
                 let new_data = Arc::<[T]>::from(&arc[..]);
                 ManuallyDrop::into_inner(arc);
 
-                image.ptr = Arc::into_raw(new_data).cast::<T>();
+                unsafe { DynamicImageChannel::get_unsafe_mut(image) }.ptr =
+                    Arc::into_raw(new_data).cast::<u8>();
             }
         }
-        extern "C" fn clear_arc_channel<T: Clone>(image: &mut UnsafeImageChannel<T>) {
-            unsafe {
-                let ptr = std::ptr::slice_from_raw_parts(image.ptr, image.data as usize);
-                Arc::<[T]>::from_raw(ptr);
-            }
+        unsafe extern "C-unwind" fn clear_arc_channel<T>(image: &mut DynamicImageChannel) {
+            drop(ManuallyDrop::into_inner(unsafe { arc_view::<T>(image) }));
         }
 
-        extern "C" fn clone_arc_channel<T: Clone>(
-            image: &UnsafeImageChannel<T>,
-        ) -> UnsafeImageChannel<T> {
-            let arc = ManuallyDrop::new(unsafe {
-                let ptr = std::ptr::slice_from_raw_parts(image.ptr, image.data as usize);
-                Arc::<[T]>::from_raw(ptr)
-            });
-            UnsafeImageChannel::new_arc(
-                (*arc).clone(),
-                image.width,
-                image.height,
-                image.pixel_elements,
+        unsafe extern "C-unwind" fn clone_arc_channel<T: PixelTypePrimitive>(
+            image: &DynamicImageChannel,
+        ) -> DynamicImageChannel {
+            let arc = unsafe { arc_view::<T>(image) };
+            DynamicImageChannel::from_arc(
+                Arc::clone(&arc),
+                image.width(),
+                image.height(),
+                image.pixel_elements(),
             )
         }
 
         &ImageChannelVTable {
-            drop: clear_arc_channel,
-            clone: clone_arc_channel,
-            make_mut,
+            drop: clear_arc_channel::<T>,
+            clone: clone_arc_channel::<T>,
+            make_mut: make_mut::<T>,
+            primitive_size: primitive_size::<T>,
         }
     };
 }
 
-pub(crate) extern "C" fn clone_slice_into_arc_channel<T: Clone>(
-    image: &UnsafeImageChannel<T>,
-) -> UnsafeImageChannel<T> {
-    UnsafeImageChannel::new_arc(
-        // Safety: Internal image is always valid
-        Arc::from(unsafe { image.buffer_flat() }),
-        image.width,
-        image.height,
-        image.pixel_elements,
+pub(crate) unsafe extern "C-unwind" fn clone_slice_into_arc_channel<T: PixelTypePrimitive>(
+    image: &DynamicImageChannel,
+) -> DynamicImageChannel {
+    DynamicImageChannel::from_arc(
+        // Safety: The vtable is built for T
+        Arc::from(unsafe { image.buffer_flat_unchecked::<T>() }),
+        image.width(),
+        image.height(),
+        image.pixel_elements(),
     )
 }

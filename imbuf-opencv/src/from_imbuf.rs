@@ -3,11 +3,20 @@ use std::{
     num::{NonZeroU8, NonZeroU32},
 };
 
-use imbuf::{DynamicImage, DynamicImageChannel, Image, ImageChannel, PixelType, RuntimePixelType};
+use bytemuck::Pod;
+use imbuf::{
+    DynamicImage, DynamicImageChannel, Image, ImageChannel, PixelType, PixelTypePrimitive,
+};
 use opencv::{
     boxed_ref::{BoxedRef, BoxedRefMut},
     core::{Code, DataType, Mat},
 };
+
+/// Primitive sizes of the supported depths. A [`DynamicImageChannel`] only knows the size of its
+/// primitive, so it is viewed as the primitive [`crate::OpencvIntoImbuf`] creates for that size.
+const U8_SIZE: usize = size_of::<u8>();
+const U16_SIZE: usize = size_of::<u16>();
+const F32_SIZE: usize = size_of::<f32>();
 
 /// Borrows an [`imbuf`] buffer as an OpenCV [`Mat`] view without copying.
 ///
@@ -48,20 +57,72 @@ fn ensure_single_channel(image: &DynamicImage) -> opencv::Result<()> {
 impl ImbufAsOpencv for DynamicImage {
     fn as_opencv(&self) -> opencv::Result<BoxedRef<'_, Mat>> {
         ensure_single_channel(self)?;
-        match self.first() {
-            DynamicImageChannel::U8(channel) => channel.as_opencv(),
-            DynamicImageChannel::U16(channel) => channel.as_opencv(),
-            DynamicImageChannel::F32(channel) => channel.as_opencv(),
-        }
+        self.first().as_opencv()
     }
 }
 impl ImbufAsOpencvMut for DynamicImage {
     fn as_opencv_mut(&mut self) -> opencv::Result<BoxedRefMut<'_, Mat>> {
         ensure_single_channel(self)?;
-        match &mut self[0] {
-            DynamicImageChannel::U8(channel) => channel.as_opencv_mut(),
-            DynamicImageChannel::U16(channel) => channel.as_opencv_mut(),
-            DynamicImageChannel::F32(channel) => channel.as_opencv_mut(),
+        self[0].as_opencv_mut()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DynamicImageChannel
+// ---------------------------------------------------------------------------
+
+fn unsupported_primitive(channel: &DynamicImageChannel) -> opencv::Error {
+    opencv::Error::new(
+        Code::StsUnsupportedFormat.into(),
+        format!(
+            "unsupported format: primitives must have 1, 2 or 4 bytes and be aligned, got {} bytes",
+            channel.primitive_size()
+        ),
+    )
+}
+
+impl ImbufAsOpencv for DynamicImageChannel {
+    fn as_opencv(&self) -> opencv::Result<BoxedRef<'_, Mat>> {
+        fn view<P: PixelTypePrimitive + Pod + DataType>(
+            channel: &DynamicImageChannel,
+        ) -> opencv::Result<BoxedRef<'_, Mat>> {
+            let flat = channel
+                .buffer_flat::<P>()
+                .ok_or_else(|| unsupported_primitive(channel))?;
+            let ptr = flat.as_ptr().cast_mut().cast::<c_void>();
+            let (dims, pixel_elements) = (channel.dimensions(), channel.pixel_elements());
+            let mat =
+                unsafe { create_unrestricted_mat::<P>(dims, flat.len(), pixel_elements, ptr) }?;
+            Ok(BoxedRef::from(mat))
+        }
+
+        match self.primitive_size().get() {
+            U8_SIZE => view::<u8>(self),
+            U16_SIZE => view::<u16>(self),
+            F32_SIZE => view::<f32>(self),
+            _ => Err(unsupported_primitive(self)),
+        }
+    }
+}
+impl ImbufAsOpencvMut for DynamicImageChannel {
+    fn as_opencv_mut(&mut self) -> opencv::Result<BoxedRefMut<'_, Mat>> {
+        fn view<P: PixelTypePrimitive + Pod + DataType>(
+            channel: &mut DynamicImageChannel,
+        ) -> opencv::Result<BoxedRefMut<'_, Mat>> {
+            let (dims, pixel_elements) = (channel.dimensions(), channel.pixel_elements());
+            let error = unsupported_primitive(channel);
+            let flat = channel.primitive_make_mut::<P>().ok_or(error)?;
+            let ptr = flat.as_mut_ptr().cast::<c_void>();
+            let mat =
+                unsafe { create_unrestricted_mat::<P>(dims, flat.len(), pixel_elements, ptr) }?;
+            Ok(BoxedRefMut::from(mat))
+        }
+
+        match self.primitive_size().get() {
+            U8_SIZE => view::<u8>(self),
+            U16_SIZE => view::<u16>(self),
+            F32_SIZE => view::<f32>(self),
+            _ => Err(unsupported_primitive(self)),
         }
     }
 }
@@ -70,7 +131,7 @@ impl ImbufAsOpencvMut for DynamicImage {
 // ImageChannel
 // ---------------------------------------------------------------------------
 
-impl<TP: RuntimePixelType> ImbufAsOpencv for ImageChannel<TP>
+impl<TP: PixelType> ImbufAsOpencv for ImageChannel<TP>
 where
     TP::Primitive: DataType,
 {
@@ -79,11 +140,13 @@ where
         let flat = self.buffer_flat();
         let len = flat.len();
         let ptr = flat.as_ptr().cast_mut().cast::<c_void>();
-        let mat = unsafe { create_unrestricted_mat::<TP>(dims, len, self.pixel_elements(), ptr) }?;
+        let mat = unsafe {
+            create_unrestricted_mat::<TP::Primitive>(dims, len, self.pixel_elements(), ptr)
+        }?;
         Ok(BoxedRef::from(mat))
     }
 }
-impl<TP: RuntimePixelType> ImbufAsOpencvMut for ImageChannel<TP>
+impl<TP: PixelType> ImbufAsOpencvMut for ImageChannel<TP>
 where
     TP::Primitive: DataType,
 {
@@ -92,7 +155,9 @@ where
         let flat = self.primitive_make_mut();
         let len = flat.len();
         let ptr = flat.as_mut_ptr().cast::<c_void>();
-        let mat = unsafe { create_unrestricted_mat::<TP>(dims, len, self.pixel_elements(), ptr) }?;
+        let mat = unsafe {
+            create_unrestricted_mat::<TP::Primitive>(dims, len, self.pixel_elements(), ptr)
+        }?;
         Ok(BoxedRefMut::from(mat))
     }
 }
@@ -109,7 +174,9 @@ where
         let dims = self.dimensions();
         let flat = self.buffer_flat();
         let ptr = flat.as_ptr().cast_mut().cast::<c_void>();
-        let mat = unsafe { create_unrestricted_mat::<TP>(dims, flat.len(), TP::ELEMENTS, ptr) }?;
+        let mat = unsafe {
+            create_unrestricted_mat::<TP::Primitive>(dims, flat.len(), TP::ELEMENTS, ptr)
+        }?;
         Ok(BoxedRef::from(mat))
     }
 }
@@ -121,7 +188,9 @@ where
         let dims = self.dimensions();
         let flat = self.buffer_flat_mut();
         let ptr = flat.as_mut_ptr().cast::<c_void>();
-        let mat = unsafe { create_unrestricted_mat::<TP>(dims, flat.len(), TP::ELEMENTS, ptr) }?;
+        let mat = unsafe {
+            create_unrestricted_mat::<TP::Primitive>(dims, flat.len(), TP::ELEMENTS, ptr)
+        }?;
         Ok(BoxedRefMut::from(mat))
     }
 }
@@ -130,15 +199,12 @@ where
 ///
 /// # Safety
 /// Assumes that the returned `Mat`'s lifetime is restricted.
-unsafe fn create_unrestricted_mat<TP: RuntimePixelType>(
+unsafe fn create_unrestricted_mat<P: DataType>(
     (width, height): (NonZeroU32, NonZeroU32),
     len: usize,
     pixel_elements: NonZeroU8,
     ptr: *mut c_void,
-) -> opencv::Result<Mat>
-where
-    TP::Primitive: DataType,
-{
+) -> opencv::Result<Mat> {
     let expected =
         u64::from(height.get()) * u64::from(width.get()) * u64::from(pixel_elements.get());
 
@@ -152,10 +218,7 @@ where
         Mat::new_rows_cols_with_data_unsafe_def(
             rows,
             cols,
-            opencv::core::CV_MAKETYPE(
-                TP::Primitive::opencv_depth(),
-                i32::from(pixel_elements.get()),
-            ),
+            opencv::core::CV_MAKETYPE(P::opencv_depth(), i32::from(pixel_elements.get())),
             ptr,
         )
     }
@@ -352,9 +415,10 @@ mod tests {
             data_ptr
         );
 
-        let DynamicImageChannel::U8(channel) = dynamic.first() else {
-            panic!("Expected U8 channel");
-        };
+        let channel = dynamic
+            .first()
+            .try_cast::<u8>()
+            .expect("Expected U8 channel");
         assert_eq!(channel.buffer_flat(), &[1, 2]);
     }
 
@@ -370,9 +434,10 @@ mod tests {
             mat.data_typed_mut::<u8>().unwrap()[0] = 42;
         }
 
-        let DynamicImageChannel::U8(channel) = dynamic.first() else {
-            panic!("Expected U8 channel");
-        };
+        let channel = dynamic
+            .first()
+            .try_cast::<u8>()
+            .expect("Expected U8 channel");
         assert_eq!(channel.buffer_flat(), &[42, 2]);
     }
 
@@ -396,5 +461,27 @@ mod tests {
             mat.data_typed::<VecN<u8, 3>>().unwrap(),
             &[VecN([1, 2, 3]), VecN([4, 5, 6])]
         );
+    }
+
+    #[test]
+    fn dynamic_channel_with_unsupported_primitive_size_is_rejected() {
+        #[derive(Clone, Copy, PartialEq)]
+        #[repr(transparent)]
+        struct F64(f64);
+        unsafe impl bytemuck::Zeroable for F64 {}
+        unsafe impl bytemuck::Pod for F64 {}
+        impl PixelTypePrimitive for F64 {}
+
+        let mut channel = DynamicImageChannel::new_vec(
+            vec![F64(1.)],
+            NonZeroU32::MIN,
+            NonZeroU32::MIN,
+            NonZeroU8::MIN,
+        );
+
+        let error = channel.as_opencv().unwrap_err();
+        assert_eq!(error.code_as_enum(), Some(Code::StsUnsupportedFormat));
+        let error = channel.as_opencv_mut().unwrap_err();
+        assert_eq!(error.code_as_enum(), Some(Code::StsUnsupportedFormat));
     }
 }

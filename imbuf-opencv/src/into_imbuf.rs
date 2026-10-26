@@ -1,14 +1,14 @@
 use std::{
     ffi::c_void,
     fmt::Display,
-    mem::{ManuallyDrop, transmute},
-    num::{NonZeroU8, NonZeroU32},
-    slice,
+    mem::ManuallyDrop,
+    num::{NonZeroU8, NonZeroU32, NonZeroUsize},
 };
 
+use bytemuck::Pod;
 use imbuf::{
-    DynamicImage, DynamicSize, Image, ImageChannel, ImageChannelVTable, PixelType,
-    PixelTypePrimitive, UnsafeImageChannel,
+    DynamicImage, DynamicImageChannel, Image, ImageChannelVTable, PixelType, PixelTypePrimitive,
+    UnsafeImageChannel,
 };
 use opencv::{
     core::{
@@ -65,7 +65,7 @@ impl OpencvIntoImbuf for Mat {
     }
 }
 
-fn dynamic_image<P: PixelTypePrimitive>(mat: Mat) -> opencv::Result<DynamicImage> {
+fn dynamic_image<P: PixelTypePrimitive + Pod>(mat: Mat) -> opencv::Result<DynamicImage> {
     let dims = mat.dims();
     if !(2..=3).contains(&dims) || mat.data().is_null() {
         return Err(opencv::Error::new(
@@ -85,7 +85,7 @@ fn dynamic_image<P: PixelTypePrimitive>(mat: Mat) -> opencv::Result<DynamicImage
         let height = nonzero_dimension(mat.rows())?;
         let pixel_elements = nonzero_pixel_elements(mat.channels())?;
         let channel = unsafe { into_channel::<P>(mat, width, height, pixel_elements) };
-        Ok(DynamicImage::from_channels(channel.into(), []))
+        Ok(DynamicImage::from_channels(channel, []))
     } else {
         if mat.channels() != 1 {
             return Err(opencv::Error::new(
@@ -107,10 +107,7 @@ fn dynamic_image<P: PixelTypePrimitive>(mat: Mat) -> opencv::Result<DynamicImage
                 "Mat must have at least one plane",
             ));
         };
-        Ok(DynamicImage::from_channels(
-            first.into(),
-            channels.map(Into::into),
-        ))
+        Ok(DynamicImage::from_channels(first, channels))
     }
 }
 
@@ -148,26 +145,30 @@ fn mat_buffer_is_exclusive(mat: &Mat) -> bool {
     u.refcount() == 1 && u.urefcount() == 0 && u.mapcount() == 0
 }
 
-/// Reborrows the `cv::Mat` owned by `data` without taking ownership.
-unsafe fn mat_view(data: *mut ()) -> ManuallyDrop<Mat> {
+/// Reborrows the `cv::Mat` owned by the channel without taking ownership.
+unsafe fn mat_view(image: &DynamicImageChannel) -> ManuallyDrop<Mat> {
+    let data = DynamicImageChannel::get_unsafe(image).data;
     ManuallyDrop::new(unsafe { Mat::from_raw(data.cast()) })
 }
 
-const fn vtable<P: PixelTypePrimitive>() -> &'static ImageChannelVTable<P> {
+const fn vtable<P: PixelTypePrimitive + Pod>() -> &'static ImageChannelVTable {
     &ImageChannelVTable {
         clone: clone_mat_channel::<P>,
         make_mut: make_mat_channel_mut::<P>,
-        drop: drop_mat_channel::<P>,
+        drop: drop_mat_channel,
+        primitive_size: primitive_size::<P>,
     }
 }
 
-unsafe fn into_channel<P: PixelTypePrimitive>(
+/// # Safety
+/// `mat` must be continuous and hold `width * height * pixel_elements` values of `P`
+unsafe fn into_channel<P: PixelTypePrimitive + Pod>(
     mat: Mat,
     width: NonZeroU32,
     height: NonZeroU32,
     pixel_elements: NonZeroU8,
-) -> ImageChannel<DynamicSize<P>> {
-    let ptr = mat.data() as *const P;
+) -> DynamicImageChannel {
+    let ptr = mat.data();
     let data = mat.into_raw().cast::<()>();
     let channel = UnsafeImageChannel::new_with_vtable(
         ptr,
@@ -177,86 +178,86 @@ unsafe fn into_channel<P: PixelTypePrimitive>(
         vtable::<P>(),
         data,
     );
-    // ImageChannel is #[repr(transparent)] over UnsafeImageChannel, and the only
-    // wrapping constructor (`from_unsafe_internal`) is pub(crate) in imbuf 0.3
-
-    // Safety:
-    unsafe { ImageChannel::from_unsafe(channel) }
+    // Safety: The Mat keeps the buffer alive until the vtable drops it
+    unsafe { DynamicImageChannel::from_unsafe(channel) }
 }
 
-fn planar_channel<P: PixelTypePrimitive>(
+fn planar_channel<P: PixelTypePrimitive + Pod>(
     mat: &Mat,
     plane: i32,
     width: NonZeroU32,
     height: NonZeroU32,
-) -> opencv::Result<ImageChannel<DynamicSize<P>>> {
+) -> opencv::Result<DynamicImageChannel> {
     let mut ranges = Vector::<Range>::new();
     ranges.push(Range::new(plane, plane + 1)?);
     ranges.push(Range::all()?);
     ranges.push(Range::all()?);
     let view = Mat::ranges(mat, &ranges)?.opencv_into_extern_container()?;
-    Ok(unsafe { into_channel(view, width, height, NonZeroU8::MIN) })
+    Ok(unsafe { into_channel::<P>(view, width, height, NonZeroU8::MIN) })
 }
 
-unsafe extern "C" fn clone_mat_channel<P: PixelTypePrimitive>(
-    image: &UnsafeImageChannel<P>,
-) -> UnsafeImageChannel<P> {
-    let mat = unsafe { mat_view(image.data) };
+extern "C-unwind" fn primitive_size<P>() -> NonZeroUsize {
+    const { NonZeroUsize::new(size_of::<P>()).expect("Primitives are not zero sized") }
+}
+
+unsafe extern "C-unwind" fn clone_mat_channel<P: PixelTypePrimitive + Pod>(
+    image: &DynamicImageChannel,
+) -> DynamicImageChannel {
+    let mat = unsafe { mat_view(image) };
     match Mat::copy(&*mat).and_then(OpenCVIntoExternContainer::opencv_into_extern_container) {
         Ok(cloned) => unsafe {
-            UnsafeImageChannel::new_with_vtable(
-                cloned.data().cast(),
-                image.width,
-                image.height,
-                image.pixel_elements,
-                image.vtable,
+            DynamicImageChannel::from_unsafe(UnsafeImageChannel::new_with_vtable(
+                cloned.data(),
+                image.width(),
+                image.height(),
+                image.pixel_elements(),
+                DynamicImageChannel::get_unsafe(image).vtable,
                 cloned.into_raw().cast::<()>(),
-            )
+            ))
         },
         Err(error) => {
             log::warn!("Cloning channel as Vec copy, cannot share Mat buffer: {error}");
-            copied_channel(image)
+            copied_channel::<P>(image)
         }
     }
 }
 
-unsafe extern "C" fn make_mat_channel_mut<P: PixelTypePrimitive>(
-    image: &mut UnsafeImageChannel<P>,
+unsafe extern "C-unwind" fn make_mat_channel_mut<P: PixelTypePrimitive + Pod>(
+    image: &mut DynamicImageChannel,
 ) {
-    let mat = unsafe { mat_view(image.data) };
+    let mat = unsafe { mat_view(image) };
     if mat_buffer_is_exclusive(&mat) {
-        // `image.ptr` already points into this Mat's buffer; keep it.
+        // The pointer already points into this Mat's buffer; keep it.
         return;
     }
 
+    // Assigning drops the previous channel, which releases its Mat
     *image = match mat.try_clone() {
         Ok(owned) => unsafe {
-            UnsafeImageChannel::new_with_vtable(
-                owned.data().cast(),
-                image.width,
-                image.height,
-                image.pixel_elements,
-                image.vtable,
+            DynamicImageChannel::from_unsafe(UnsafeImageChannel::new_with_vtable(
+                owned.data(),
+                image.width(),
+                image.height(),
+                image.pixel_elements(),
+                DynamicImageChannel::get_unsafe(image).vtable,
                 owned.into_raw().cast(),
-            )
+            ))
         },
         Err(error) => {
             log::warn!("Cloning channel as Vec copy, cannot clone Mat buffer: {error}");
-            copied_channel(image)
+            copied_channel::<P>(image)
         }
     };
 }
 
-unsafe extern "C" fn drop_mat_channel<P: PixelTypePrimitive>(image: &mut UnsafeImageChannel<P>) {
-    drop(unsafe { Mat::from_raw(image.data.cast()) });
+unsafe extern "C-unwind" fn drop_mat_channel(image: &mut DynamicImageChannel) {
+    drop(ManuallyDrop::into_inner(unsafe { mat_view(image) }));
 }
 
-fn copied_channel<P: PixelTypePrimitive>(image: &UnsafeImageChannel<P>) -> UnsafeImageChannel<P> {
-    let len = image.width.get() as usize
-        * image.height.get() as usize
-        * image.pixel_elements.get() as usize;
-    let data = unsafe { slice::from_raw_parts(image.ptr, len) }.to_vec();
-    UnsafeImageChannel::new_vec(data, image.width, image.height, image.pixel_elements)
+fn copied_channel<P: PixelTypePrimitive + Pod>(image: &DynamicImageChannel) -> DynamicImageChannel {
+    // Safety: The vtable is built for P
+    let data = unsafe { image.buffer_flat_unchecked::<P>() }.to_vec();
+    DynamicImageChannel::new_vec(data, image.width(), image.height(), image.pixel_elements())
 }
 
 fn nonzero_dimension(value: i32) -> opencv::Result<NonZeroU32> {
@@ -284,7 +285,7 @@ fn nonzero_pixel_elements(value: i32) -> opencv::Result<NonZeroU8> {
 mod tests {
     use std::num::NonZeroU32;
 
-    use imbuf::{DynamicImageChannel, Image};
+    use imbuf::Image;
     use opencv::core::{Code, Mat, VecN};
     use opencv::traits::OpenCVIntoExternContainer;
     use testresult::TestResult;
@@ -306,9 +307,10 @@ mod tests {
         let dynamic = mat.into_imbuf_dynamic().unwrap();
 
         assert_eq!(dynamic.len_nonzero().get(), 1);
-        let DynamicImageChannel::U8(channel) = dynamic.first() else {
-            panic!("Expected U8 channel");
-        };
+        let channel = dynamic
+            .first()
+            .try_cast::<u8>()
+            .expect("Expected U8 channel");
         assert_eq!(channel.pixel_elements().get(), 1);
         assert_eq!(channel.dimensions(), dimensions(3, 2));
         assert_eq!(channel.buffer_flat(), &[1, 2, 3, 4, 5, 6]);
@@ -322,9 +324,10 @@ mod tests {
         let dynamic = mat.into_imbuf_dynamic().unwrap();
 
         assert_eq!(dynamic.len_nonzero().get(), 1);
-        let DynamicImageChannel::U16(channel) = dynamic.first() else {
-            panic!("Expected U16 channel");
-        };
+        let channel = dynamic
+            .first()
+            .try_cast::<u16>()
+            .expect("Expected U16 channel");
         assert_eq!(channel.pixel_elements().get(), 1);
         assert_eq!(channel.dimensions(), dimensions(2, 2));
         assert_eq!(channel.buffer_flat(), &[10, 20, 30, 40]);
@@ -337,9 +340,10 @@ mod tests {
         let data_ptr = mat.data() as usize;
         let dynamic = mat.into_imbuf_dynamic().unwrap();
 
-        let DynamicImageChannel::F32(channel) = dynamic.first() else {
-            panic!("Expected F32 channel");
-        };
+        let channel = dynamic
+            .first()
+            .try_cast::<f32>()
+            .expect("Expected F32 channel");
         assert_eq!(channel.pixel_elements().get(), 1);
         assert_eq!(channel.dimensions(), dimensions(2, 2));
         assert_eq!(channel.buffer_flat(), &[0.5, 1.5, 2.5, 3.5]);
@@ -376,9 +380,10 @@ mod tests {
         assert!(dynamic.is_uniform());
         assert_eq!(dynamic.len_nonzero().get(), 3);
 
-        let DynamicImageChannel::U16(first) = dynamic.first() else {
-            panic!("Expected U16 channel");
-        };
+        let first = dynamic
+            .first()
+            .try_cast::<u16>()
+            .expect("Expected U16 channel");
         assert_eq!(first.pixel_elements().get(), 1);
         assert_eq!(first.buffer_flat().as_ptr() as usize, data_ptr);
 
@@ -410,9 +415,10 @@ mod tests {
         let cloned = dynamic.clone();
         drop(dynamic);
 
-        let DynamicImageChannel::U8(channel) = cloned.first() else {
-            panic!("Expected U8 channel");
-        };
+        let channel = cloned
+            .first()
+            .try_cast::<u8>()
+            .expect("Expected U8 channel");
         assert_eq!(channel.buffer_flat(), &[1, 2, 3, 4]);
         assert_eq!(channel.buffer_flat().as_ptr() as usize, data_ptr);
     }
@@ -424,20 +430,16 @@ mod tests {
         let mut dynamic = mat.into_imbuf_dynamic().unwrap();
         let cloned = dynamic.clone();
 
-        let DynamicImageChannel::U8(channel) = &mut dynamic[0] else {
-            panic!("Expected U8 channel");
-        };
+        let channel = dynamic[0]
+            .try_cast_mut::<u8>()
+            .expect("Expected U8 channel");
         channel.primitive_make_mut()[0] = 42;
 
-        let DynamicImageChannel::U8(channel) = &dynamic[0] else {
-            panic!("Expected U8 channel");
-        };
+        let channel = dynamic[0].try_cast::<u8>().expect("Expected U8 channel");
         assert_eq!(channel.buffer_flat(), &[42, 2, 3, 4]);
         assert_ne!(channel.buffer_flat().as_ptr() as usize, data_ptr);
 
-        let DynamicImageChannel::U8(channel) = &cloned[0] else {
-            panic!("Expected U8 channel");
-        };
+        let channel = cloned[0].try_cast::<u8>().expect("Expected U8 channel");
         assert_eq!(channel.buffer_flat(), &[1, 2, 3, 4]);
         assert_eq!(channel.buffer_flat().as_ptr() as usize, data_ptr);
     }
@@ -448,14 +450,12 @@ mod tests {
         let data_ptr = mat.data() as usize;
         let mut dynamic = mat.into_imbuf_dynamic().unwrap();
 
-        let DynamicImageChannel::U8(channel) = &mut dynamic[0] else {
-            panic!("Expected U8 channel");
-        };
+        let channel = dynamic[0]
+            .try_cast_mut::<u8>()
+            .expect("Expected U8 channel");
         channel.primitive_make_mut()[0] = 42;
 
-        let DynamicImageChannel::U8(channel) = &dynamic[0] else {
-            panic!("Expected U8 channel");
-        };
+        let channel = dynamic[0].try_cast::<u8>().expect("Expected U8 channel");
         assert_eq!(channel.buffer_flat(), &[42, 2, 3, 4]);
         assert_eq!(channel.buffer_flat().as_ptr() as usize, data_ptr);
     }
@@ -468,14 +468,12 @@ mod tests {
         let data_ptr = mat.data() as usize;
         let mut dynamic = mat.into_imbuf_dynamic().unwrap();
 
-        let DynamicImageChannel::U8(channel) = &mut dynamic[0] else {
-            panic!("Expected U8 channel");
-        };
+        let channel = dynamic[0]
+            .try_cast_mut::<u8>()
+            .expect("Expected U8 channel");
         channel.primitive_make_mut()[0] = 42;
 
-        let DynamicImageChannel::U8(channel) = &dynamic[0] else {
-            panic!("Expected U8 channel");
-        };
+        let channel = dynamic[0].try_cast::<u8>().expect("Expected U8 channel");
         assert_eq!(channel.buffer_flat(), &[42, 2, 3, 4]);
         assert_ne!(channel.buffer_flat().as_ptr() as usize, data_ptr);
         assert_eq!(backing, [1, 2, 3, 4]);
@@ -508,34 +506,27 @@ mod tests {
         let mut dynamic = mat.into_imbuf_dynamic().unwrap();
         let cloned = dynamic.clone();
         let plane_ptrs: Vec<usize> = (0..dynamic.len_nonzero().get())
-            .map(|index| match &dynamic[index] {
-                DynamicImageChannel::U16(channel) => channel.buffer_flat().as_ptr() as usize,
-                _ => panic!("Expected U16 channel"),
-            })
+            .map(|index| dynamic[index].buffer_flat_bytes().as_ptr() as usize)
             .collect();
         assert_eq!(plane_ptrs[0], data_ptr);
 
-        let DynamicImageChannel::U16(channel) = &mut dynamic[1] else {
-            panic!("Expected U16 channel");
-        };
+        let channel = dynamic[1]
+            .try_cast_mut::<u16>()
+            .expect("Expected U16 channel");
         channel.primitive_make_mut()[0] = 42;
 
-        let DynamicImageChannel::U16(channel) = &dynamic[1] else {
-            panic!("Expected U16 channel");
-        };
+        let channel = dynamic[1].try_cast::<u16>().expect("Expected U16 channel");
         assert_eq!(channel.buffer_flat(), &[42, 6, 7, 8]);
         assert_ne!(channel.buffer_flat().as_ptr() as usize, plane_ptrs[1]);
 
         for index in [0usize, 2] {
-            let DynamicImageChannel::U16(channel) = &dynamic[index] else {
-                panic!("Expected U16 channel");
-            };
+            let channel = dynamic[index]
+                .try_cast::<u16>()
+                .expect("Expected U16 channel");
             assert_eq!(channel.buffer_flat().as_ptr() as usize, plane_ptrs[index]);
         }
 
-        let DynamicImageChannel::U16(channel) = &cloned[1] else {
-            panic!("Expected U16 channel");
-        };
+        let channel = cloned[1].try_cast::<u16>().expect("Expected U16 channel");
         assert_eq!(channel.buffer_flat(), &[5, 6, 7, 8]);
         assert_eq!(channel.buffer_flat().as_ptr() as usize, plane_ptrs[1]);
     }

@@ -1,6 +1,6 @@
 use std::num::NonZeroU32;
 
-use imbuf::{DynamicImage, DynamicImageChannel, Image};
+use imbuf::{DynamicImage, Image};
 use imbuf_opencv::{ImbufAsOpencv, ImbufAsOpencvMut, OpencvIntoImbuf};
 use opencv::core::{Mat, MatTraitConst, MatTraitConstManual, MatTraitManual};
 
@@ -55,9 +55,10 @@ fn as_opencv_shares_buffer_for_dynamic_image_references() {
         NonZeroU32::new(2).unwrap(),
         NonZeroU32::new(2).unwrap(),
     ));
-    let DynamicImageChannel::U8(channel) = dynamic.first() else {
-        panic!("Expected U8 channel");
-    };
+    let channel = dynamic
+        .first()
+        .try_cast::<u8>()
+        .expect("Expected U8 channel");
     let ptr = channel.buffer_flat().as_ptr() as usize;
 
     let shared: &DynamicImage = &dynamic;
@@ -121,9 +122,10 @@ fn as_opencv_mut_writes_through_for_dynamic_image() {
         view.data_typed_mut::<u8>().unwrap()[0] = 9;
     }
 
-    let imbuf::DynamicImageChannel::U8(channel) = dynamic.first() else {
-        panic!("Expected U8 channel");
-    };
+    let channel = dynamic
+        .first()
+        .try_cast::<u8>()
+        .expect("Expected U8 channel");
     assert_eq!(channel.buffer_flat()[0], 9);
 }
 
@@ -133,9 +135,10 @@ fn opencv_mat_into_dynamic_imbuf_shares_buffer() {
     let ptr = mat.data() as usize;
 
     let dynamic = mat.into_imbuf_dynamic().unwrap();
-    let DynamicImageChannel::U8(channel) = dynamic.first() else {
-        panic!("Expected U8 channel");
-    };
+    let channel = dynamic
+        .first()
+        .try_cast::<u8>()
+        .expect("Expected U8 channel");
     assert_eq!(channel.buffer_flat().as_ptr() as usize, ptr);
     assert_eq!(channel.dimensions(), dims(3, 2));
 }

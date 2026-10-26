@@ -6,19 +6,15 @@ use std::num::NonZeroU8;
 mod arc;
 mod channel;
 mod dynamic;
-mod external;
 mod image;
 mod pixel;
-mod pixel_elements;
 mod shared_vec;
 mod vec;
 
 pub use channel::{BorrowableImageChannel, ImageChannel, ImageChannelVTable, UnsafeImageChannel};
 pub use dynamic::{DynamicImage, DynamicImageChannel, IncompatibleImageError};
-#[cfg(feature = "image_0_25")]
-pub use external::*;
 pub use image::{Image, ImageChannels, ImageMut, ImageRef};
-pub use pixel::{DynamicSize, PixelType, PixelTypePrimitive, RuntimePixelType};
+pub use pixel::{PixelType, PixelTypePrimitive};
 
 #[deprecated(
     since = "0.3.0",
@@ -53,14 +49,14 @@ const fn unwrap_usize_to_nonzero_u8(value: usize) -> NonZeroU8 {
 }
 
 mod seal {
-    use crate::{ImageChannel, PixelType};
+    use crate::{ImageChannel, PixelType, PixelTypePrimitive};
 
-    /// Allows to forbid external implementations to add new primitives
-    /// This crate heavily relies on casting between primitive pointers
-    pub trait SealedPrimitive {}
-    impl SealedPrimitive for u8 {}
-    impl SealedPrimitive for u16 {}
-    impl SealedPrimitive for f32 {}
+    /// `PixelType` is only implemented for primitives and arrays of primitives.
+    /// This crate casts between buffers of pixels and buffers of their primitives,
+    /// which is only sound for these layouts.
+    pub trait SealedPixelType {}
+    impl<T: PixelTypePrimitive> SealedPixelType for T {}
+    impl<T: PixelTypePrimitive, const PIXEL_ELEMENTS: usize> SealedPixelType for [T; PIXEL_ELEMENTS] {}
 
     pub trait SealedImageChannel {}
     impl<T: PixelType> SealedImageChannel for ImageChannel<T> {}

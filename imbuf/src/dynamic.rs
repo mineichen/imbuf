@@ -1,13 +1,18 @@
 use std::{
-    fmt::Debug,
+    fmt::{self, Debug, Formatter},
     iter::{self, once},
     mem::MaybeUninit,
     num::{NonZeroU8, NonZeroU32, NonZeroUsize},
     ops::Deref,
-    slice, vec,
+    ptr, slice, vec,
 };
 
-use crate::{Image, ImageChannel, ImageMut, ImageRef, PixelType, pixel::DynamicSize};
+use bytemuck::Pod;
+
+use crate::{
+    Image, ImageChannel, ImageMut, ImageRef, PixelType, PixelTypePrimitive,
+    channel::UnsafeImageChannel,
+};
 
 /// Image with number of channels and their types and dimensions only known at runtime
 /// There are no guarantees that the types or dimensions of channels match. See `ImageChannels` for more information.
@@ -38,19 +43,11 @@ impl DynamicImage {
         &self.channels[self.channels.len() - 1]
     }
 
-    /// Checkes, if all channels have the same width, height, pixel_elements and pixel_kind
+    /// Checks, if all channels have the same width, height, `pixel_elements` and `primitive_size`
+    #[must_use]
     pub fn is_uniform(&self) -> bool {
-        let (first, mut rest) = self.mapped_channels(|x| {
-            (
-                match x {
-                    DynamicImageChannel::U8(_) => 0,
-                    DynamicImageChannel::U16(_) => 1,
-                    DynamicImageChannel::F32(_) => 2,
-                },
-                x.pixel_elements(),
-                x.dimensions(),
-            )
-        });
+        let (first, mut rest) =
+            self.mapped_channels(|x| (x.primitive_size(), x.pixel_elements(), x.dimensions()));
         rest.all(|x| x == first)
     }
 
@@ -126,53 +123,253 @@ impl std::ops::DerefMut for DynamicImage {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum DynamicImageChannel {
-    U8(ImageChannel<DynamicSize<u8>>),
-    U16(ImageChannel<DynamicSize<u16>>),
-    F32(ImageChannel<DynamicSize<f32>>),
-}
+/// Channel whose primitive and number of pixel elements are only known at runtime.
+///
+/// The channel only knows the size of its primitive (e.g. 2 bytes for `u16`). Its buffer can
+/// therefore be viewed as any [`Pod`] primitive of the same size and alignment, e.g. via
+/// [`DynamicImageChannel::buffer_flat`], [`DynamicImageChannel::try_cast`] or
+/// `ImageChannel::try_from`. For the same reason, only [`ImageChannel`]s of `Pod` primitives can
+/// be converted into a `DynamicImageChannel`:
+///
+/// ```compile_fail,E0277
+/// use std::num::{NonZeroU8, NonZeroU32};
+/// use imbuf::{DynamicImageChannel, ImageChannel, PixelTypePrimitive};
+///
+/// #[derive(Clone, PartialEq)]
+/// struct NonZero(NonZeroU8);
+/// impl PixelTypePrimitive for NonZero {}
+///
+/// let channel = ImageChannel::new_vec(vec![NonZero(NonZeroU8::MIN)], NonZeroU32::MIN, NonZeroU32::MIN);
+/// // Would allow writing 0 through `ImageChannel<u8>`
+/// let dynamic = DynamicImageChannel::from(channel);
+/// ```
+#[repr(transparent)]
+pub struct DynamicImageChannel(UnsafeImageChannel);
 
 impl DynamicImageChannel {
+    /// Takes ownership of an [`UnsafeImageChannel`], e.g. to support a custom storage.
+    ///
+    /// # Safety
+    /// `channel` has to uphold the following invariants:
+    /// - The size of the buffer in bytes (`width * height * pixel_elements * vtable.primitive_size()`)
+    ///   doesn't exceed `isize::MAX`.
+    /// - `ptr` points to an initialized buffer of that size, which stays valid until `vtable.drop`
+    ///   is called. The buffer can be shared between instances.
+    /// - `vtable` is able to work with `ptr` and `data` (see [`ImageChannelVTable`](crate::ImageChannelVTable)).
+    ///   Any bytes written through a `Pod` view of the buffer have to be valid for the vtable
+    ///   (e.g. the primitive of the vtable is `Pod` itself).
+    /// - `ptr` and `data` can be sent to and shared between threads.
     #[must_use]
-    pub fn pixel_elements(&self) -> NonZeroU8 {
-        match self {
-            DynamicImageChannel::U8(x) => x.pixel_elements(),
-            DynamicImageChannel::U16(x) => x.pixel_elements(),
-            DynamicImageChannel::F32(x) => x.pixel_elements(),
-        }
+    pub const unsafe fn from_unsafe(channel: UnsafeImageChannel) -> Self {
+        Self(channel)
+    }
+
+    /// Read access to the raw parts, e.g. to implement an [`ImageChannelVTable`](crate::ImageChannelVTable).
+    #[must_use]
+    pub const fn get_unsafe(channel: &Self) -> &UnsafeImageChannel {
+        &channel.0
+    }
+
+    /// Write access to the raw parts, e.g. to implement [`ImageChannelVTable::make_mut`](crate::ImageChannelVTable::make_mut).
+    ///
+    /// # Safety
+    /// The invariants of [`DynamicImageChannel::from_unsafe`] have to hold when the borrow ends.
+    /// Assigning a new `UnsafeImageChannel` leaks the previous buffer, as it doesn't implement
+    /// `Drop`. Assign a `DynamicImageChannel` to the outer reference instead.
+    pub const unsafe fn get_unsafe_mut(channel: &mut Self) -> &mut UnsafeImageChannel {
+        &mut channel.0
+    }
+
+    /// # Panics
+    /// Panics if the buffer size is not compatible with the width, height and `pixel_elements`.
+    #[must_use]
+    pub fn new_vec<T: PixelTypePrimitive + Pod>(
+        data: Vec<T>,
+        width: NonZeroU32,
+        height: NonZeroU32,
+        pixel_elements: NonZeroU8,
+    ) -> Self {
+        Self::from_vec(data, width, height, pixel_elements)
     }
 
     #[must_use]
-    pub fn dimensions(&self) -> (NonZeroU32, NonZeroU32) {
-        match self {
-            DynamicImageChannel::U8(x) => x.dimensions(),
-            DynamicImageChannel::U16(x) => x.dimensions(),
-            DynamicImageChannel::F32(x) => x.dimensions(),
-        }
+    pub const fn width(&self) -> NonZeroU32 {
+        self.0.width
     }
 
     #[must_use]
-    pub fn width(&self) -> NonZeroU32 {
-        match self {
-            DynamicImageChannel::U8(x) => x.width(),
-            DynamicImageChannel::U16(x) => x.width(),
-            DynamicImageChannel::F32(x) => x.width(),
-        }
+    pub const fn height(&self) -> NonZeroU32 {
+        self.0.height
     }
 
     #[must_use]
-    pub fn height(&self) -> NonZeroU32 {
-        match self {
-            DynamicImageChannel::U8(x) => x.height(),
-            DynamicImageChannel::U16(x) => x.height(),
-            DynamicImageChannel::F32(x) => x.height(),
+    pub const fn dimensions(&self) -> (NonZeroU32, NonZeroU32) {
+        (self.0.width, self.0.height)
+    }
+
+    #[must_use]
+    pub const fn dimensions_zeroable(&self) -> (u32, u32) {
+        (self.0.width.get(), self.0.height.get())
+    }
+
+    #[must_use]
+    pub const fn pixel_elements(&self) -> NonZeroU8 {
+        self.0.pixel_elements
+    }
+
+    /// Size of a single primitive in bytes
+    #[must_use]
+    pub fn primitive_size(&self) -> NonZeroUsize {
+        (self.0.vtable.primitive_size)()
+    }
+
+    #[must_use]
+    #[allow(clippy::len_without_is_empty)]
+    pub const fn len(&self) -> usize {
+        self.0.calc_len_packed()
+    }
+
+    /// Number of primitives in the buffer (`width * height * pixel_elements`)
+    #[allow(clippy::len_without_is_empty)]
+    #[must_use]
+    pub const fn len_flat(&self) -> usize {
+        self.0.calc_len_flat()
+    }
+
+    /// Returns `None`, if the size or the alignment of `T` don't match the primitive of the channel
+    #[must_use]
+    pub fn buffer_flat<T: PixelTypePrimitive + Pod>(&self) -> Option<&[T]> {
+        // Safety: Size and alignment are checked. Pod accepts any bit pattern
+        self.fits_primitive::<T>()
+            .then(|| unsafe { self.buffer_flat_unchecked() })
+    }
+
+    /// # Safety
+    /// `T` must have the size of the channels primitive, `ptr` must be aligned for `T` and the
+    /// buffer must contain valid values of `T`.
+    #[must_use]
+    pub unsafe fn buffer_flat_unchecked<T>(&self) -> &[T] {
+        debug_assert!(
+            self.fits_primitive::<T>(),
+            "The size or alignment of {} doesn't match the channel",
+            std::any::type_name::<T>()
+        );
+        // Safety: Forwarded to the caller. The length is valid due to the invariants of the channel
+        unsafe { slice::from_raw_parts(self.0.ptr.cast::<T>(), self.len_flat()) }
+    }
+
+    /// Mutable access to the buffer, which is copied if it is shared (copy on write).
+    ///
+    /// Returns `None`, if the size or the alignment of `T` don't match the primitive of the channel
+    pub fn primitive_make_mut<T: PixelTypePrimitive + Pod>(&mut self) -> Option<&mut [T]> {
+        if !self.fits_primitive::<T>() {
+            return None;
         }
+        Some(unsafe { self.primitive_make_mut_unchecked() })
+    }
+
+    pub(crate) unsafe fn primitive_make_mut_unchecked<T: PixelTypePrimitive>(
+        &mut self,
+    ) -> &mut [T] {
+        // Safety: The vtable is able to work with the channel
+        unsafe { (self.0.vtable.make_mut)(self) };
+        // Safety: Size and alignment are checked after make_mut, which might reallocate
+        unsafe { self.buffer_flat_mut_unchecked() }
+    }
+
+    #[must_use]
+    pub fn buffer_flat_bytes(&self) -> &[u8] {
+        let len = self.len_flat() * self.primitive_size().get();
+        // Safety: The buffer is initialized (invariant of the channel)
+        unsafe { slice::from_raw_parts(self.0.ptr, len) }
+    }
+
+    /// Try to view this channel as an `ImageChannel<TP>`.
+    ///
+    /// Returns `None`, if `pixel_elements`, the size or the alignment of `TP::Primitive` don't match.
+    #[must_use]
+    pub fn try_cast<TP: PixelType>(&self) -> Option<&ImageChannel<TP>>
+    where
+        TP::Primitive: Pod,
+    {
+        // Safety: `ImageChannel` is repr(transparent) over `DynamicImageChannel`. The layout is
+        // checked and Pod accepts any bit pattern
+        self.fits_pixel::<TP>()
+            .then(|| unsafe { &*ptr::from_ref(self).cast::<ImageChannel<TP>>() })
+    }
+
+    /// Mutable version of [`DynamicImageChannel::try_cast`]
+    #[must_use]
+    pub fn try_cast_mut<TP: PixelType>(&mut self) -> Option<&mut ImageChannel<TP>>
+    where
+        TP::Primitive: Pod,
+    {
+        // Safety: See try_cast
+        self.fits_pixel::<TP>()
+            .then(|| unsafe { &mut *ptr::from_mut(self).cast::<ImageChannel<TP>>() })
+    }
+
+    /// Checks, if the buffer can be viewed as `T`
+    pub(crate) fn fits_primitive<T>(&self) -> bool {
+        self.primitive_size().get() == size_of::<T>() && self.0.ptr.cast::<T>().is_aligned()
+    }
+
+    /// Checks, if the buffer can be viewed as `TP`
+    pub(crate) fn fits_pixel<TP: PixelType>(&self) -> bool {
+        self.pixel_elements() == TP::ELEMENTS && self.fits_primitive::<TP::Primitive>()
+    }
+
+    /// # Safety
+    /// See `buffer_flat_unchecked`. Additionally, the buffer must be exclusive (`make_mut`)
+    pub(crate) unsafe fn buffer_flat_mut_unchecked<T>(&mut self) -> &mut [T] {
+        debug_assert!(self.fits_primitive::<T>());
+        // Safety: Forwarded to the caller
+        unsafe { slice::from_raw_parts_mut(self.0.ptr.cast::<T>().cast_mut(), self.len_flat()) }
     }
 }
 
-impl<TPixel: PixelType + Send + Sync + Clone, const CHANNELS: usize> From<Image<TPixel, CHANNELS>>
-    for DynamicImage
+impl Drop for DynamicImageChannel {
+    fn drop(&mut self) {
+        // Safety: The vtable is able to work with the channel
+        unsafe { (self.0.vtable.drop)(self) };
+    }
+}
+
+impl Clone for DynamicImageChannel {
+    fn clone(&self) -> Self {
+        // Safety: The vtable is able to work with the channel
+        unsafe { (self.0.vtable.clone)(self) }
+    }
+}
+
+/// Channels are equal, if their dimensions, `pixel_elements`, `primitive_size` and bytes are equal
+impl PartialEq for DynamicImageChannel {
+    fn eq(&self, other: &Self) -> bool {
+        self.dimensions() == other.dimensions()
+            && self.pixel_elements() == other.pixel_elements()
+            && self.primitive_size() == other.primitive_size()
+            && self.buffer_flat_bytes() == other.buffer_flat_bytes()
+    }
+}
+
+impl Debug for DynamicImageChannel {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DynamicImageChannel")
+            .field("width", &self.width())
+            .field("height", &self.height())
+            .field("primitive_size", &self.primitive_size())
+            .field("pixel_elements", &self.pixel_elements())
+            .finish()
+    }
+}
+
+// Safety: The primitives are Send + Sync and storages have to be thread safe (invariant of `from_unsafe`)
+unsafe impl Send for DynamicImageChannel {}
+unsafe impl Sync for DynamicImageChannel {}
+
+impl<TPixel: PixelType, const CHANNELS: usize> From<Image<TPixel, CHANNELS>> for DynamicImage
+where
+    TPixel::Primitive: Pod,
 {
     fn from(value: Image<TPixel, CHANNELS>) -> Self {
         DynamicImage {
@@ -212,7 +409,10 @@ pub(crate) enum IncompatibleImageErrorReason {
     },
 }
 
-impl<T: PixelType, const CHANNELS: usize> TryFrom<DynamicImage> for Image<T, CHANNELS> {
+impl<T: PixelType, const CHANNELS: usize> TryFrom<DynamicImage> for Image<T, CHANNELS>
+where
+    T::Primitive: Pod,
+{
     type Error = IncompatibleImageError<DynamicImage>;
 
     fn try_from(value: DynamicImage) -> Result<Self, Self::Error> {
@@ -283,6 +483,8 @@ impl<T: PixelType, const CHANNELS: usize> TryFrom<DynamicImage> for Image<T, CHA
 
 impl<'a, T: PixelType, const CHANNELS: usize> TryFrom<&'a DynamicImage>
     for ImageRef<'a, T, CHANNELS>
+where
+    T::Primitive: Pod,
 {
     type Error = IncompatibleImageError<&'a DynamicImage>;
 
@@ -296,7 +498,7 @@ impl<'a, T: PixelType, const CHANNELS: usize> TryFrom<&'a DynamicImage>
                         Ok(typed) => {
                             return MaybeUninit::new(typed);
                         }
-                        Err(_e) => Err(IncompatibleImageErrorReason::Comptime {
+                        Err(()) => Err(IncompatibleImageErrorReason::Comptime {
                             pixel_dimensions: T::ELEMENTS,
                             pixel_kind: std::any::type_name::<T>(),
                             buffer_dimensions: const { NonZeroUsize::new(CHANNELS).unwrap() },
@@ -325,43 +527,27 @@ impl<'a, T: PixelType, const CHANNELS: usize> TryFrom<&'a DynamicImage>
 
 impl<'a, T: PixelType, const CHANNELS: usize> TryFrom<&'a mut DynamicImage>
     for ImageMut<'a, T, CHANNELS>
+where
+    T::Primitive: Pod,
 {
     type Error = IncompatibleImageError<&'a mut DynamicImage>;
 
     fn try_from(value: &'a mut DynamicImage) -> Result<Self, Self::Error> {
-        let mut result = Ok(());
-        let mut iter = value.channels.iter_mut();
-        let channels = std::array::from_fn(|i| {
-            if result.is_ok() {
-                result = if let Some(next) = iter.next() {
-                    match <&mut ImageChannel<T>>::try_from(next) {
-                        Ok(typed) => {
-                            return MaybeUninit::new(typed);
-                        }
-                        Err(_e) => Err(IncompatibleImageErrorReason::Comptime {
-                            pixel_dimensions: T::ELEMENTS,
-                            pixel_kind: std::any::type_name::<T>(),
-                            buffer_dimensions: const { NonZeroUsize::new(CHANNELS).unwrap() },
-                        }),
-                    }
-                } else {
-                    Err(IncompatibleImageErrorReason::RequiresMoreChannels {
-                        expected: const { crate::unwrap_usize_to_nonzero_u8(CHANNELS) },
-                        actual: crate::unwrap_usize_to_nonzero_u8(i),
-                    })
-                }
-            }
-            MaybeUninit::uninit()
-        });
-        result
-            .and_then(|()| {
-                <ImageMut<'a, T, CHANNELS>>::try_from(channels.map(|x| unsafe { x.assume_init() }))
-                    .map_err(|x: IncompatibleImageError<[&mut ImageChannel<T>; CHANNELS]>| x.reason)
-            })
-            .map_err(|reason| IncompatibleImageError {
+        // Validate with a shared borrow, so `value` can be returned in the error
+        if let Err(e) = ImageRef::<T, CHANNELS>::try_from(&*value) {
+            let reason = e.reason;
+            return Err(IncompatibleImageError {
                 image: value,
                 reason,
-            })
+            });
+        }
+        let mut iter = value.channels.iter_mut();
+        let channels = std::array::from_fn(|_| {
+            iter.next()
+                .and_then(DynamicImageChannel::try_cast_mut)
+                .expect("Channels are checked above")
+        });
+        Ok(ImageMut::try_from(channels).expect("Dimensions are checked above"))
     }
 }
 
@@ -384,6 +570,14 @@ mod tests {
     }
 
     #[test]
+    fn image_with_other_primitive_size_is_not_uniform() {
+        let ch1 = ImageChannel::<u8>::new_vec(vec![1], NonZeroU32::MIN, NonZeroU32::MIN);
+        let ch2 = ImageChannel::<u16>::new_vec(vec![1], NonZeroU32::MIN, NonZeroU32::MIN);
+        let dynamic = DynamicImage::from_channels(ch1.into(), [ch2.into()]);
+        assert!(!dynamic.is_uniform());
+    }
+
+    #[test]
     fn image_as_dynamic_is_uniform() {
         let image = Image::<u8, 3>::new_vec(
             vec![0, 1, 2, 3, 4, 5],
@@ -398,11 +592,7 @@ mod tests {
     fn first_mapped_returns_ref() {
         let ch = Image::<u8, 3>::new_vec(vec![1, 2, 3], NonZeroU32::MIN, NonZeroU32::MIN);
         let dynamic = DynamicImage::from(ch);
-        let (first, mut rest) = dynamic.mapped_channels(|x| match x {
-            DynamicImageChannel::U8(image_channel) => image_channel.buffer_flat_bytes(),
-            DynamicImageChannel::U16(image_channel) => image_channel.buffer_flat_bytes(),
-            DynamicImageChannel::F32(image_channel) => image_channel.buffer_flat_bytes(),
-        });
+        let (first, mut rest) = dynamic.mapped_channels(DynamicImageChannel::buffer_flat_bytes);
         assert_eq!(1, first[0]);
         assert_eq!(2, rest.next().unwrap()[0]);
         assert_eq!(3, rest.next().unwrap()[0]);
@@ -412,14 +602,43 @@ mod tests {
     fn first_mapped_returns_mut() {
         let ch = Image::<u8, 3>::new_vec(vec![1, 2, 3], NonZeroU32::MIN, NonZeroU32::MIN);
         let mut dynamic = DynamicImage::from(ch);
-        let (first, mut rest) = dynamic.mapped_channels_mut(|x| match x {
-            DynamicImageChannel::U8(image_channel) => image_channel.buffer_flat_bytes(),
-            DynamicImageChannel::U16(image_channel) => image_channel.buffer_flat_bytes(),
-            DynamicImageChannel::F32(image_channel) => image_channel.buffer_flat_bytes(),
-        });
-        assert_eq!(1, first[0]);
+        let (first, mut rest) =
+            dynamic.mapped_channels_mut(|x| x.primitive_make_mut::<u8>().unwrap());
+        first[0] = 4;
         assert_eq!(2, rest.next().unwrap()[0]);
         assert_eq!(3, rest.next().unwrap()[0]);
+        assert_eq!(dynamic.first().buffer_flat::<u8>(), Some(&[4][..]));
+    }
+
+    #[test]
+    fn buffer_flat_checks_primitive_size() {
+        let channel = DynamicImageChannel::new_vec(
+            vec![1u16, 2],
+            NonZeroU32::MIN,
+            NonZeroU32::MIN,
+            const { NonZeroU8::new(2).unwrap() },
+        );
+        assert_eq!(channel.primitive_size().get(), 2);
+        assert_eq!(channel.len_flat(), 2);
+        assert_eq!(channel.buffer_flat::<u16>(), Some(&[1, 2][..]));
+        assert_eq!(channel.buffer_flat::<u8>(), None);
+        assert_eq!(channel.buffer_flat::<f32>(), None);
+        assert_eq!(channel.buffer_flat_bytes(), &[1, 0, 2, 0]);
+    }
+
+    #[test]
+    fn primitive_make_mut_copies_shared_buffer() {
+        let data = std::sync::Arc::<[u8]>::from([1].as_slice());
+        let image = Image::<u8, 1>::new_arc(data, NonZeroU32::MIN, NonZeroU32::MIN);
+        let data_ptr = image.buffer().as_ptr();
+        let mut dynamic = DynamicImage::from(image);
+        let clone = dynamic.clone();
+
+        assert_eq!(dynamic[0].primitive_make_mut::<u16>(), None);
+        let buffer = dynamic[0].primitive_make_mut::<u8>().unwrap();
+        buffer[0] = 2;
+        assert_ne!(buffer.as_ptr(), data_ptr);
+        assert_eq!(clone.first().buffer_flat::<u8>(), Some(&[1][..]));
     }
 
     #[test]
@@ -477,10 +696,8 @@ mod tests {
         let rgb = Image::<[u8; 3], 1>::new_vec(vec![[1u8, 2, 3]], NonZeroU32::MIN, NonZeroU32::MIN);
         let dynamic = DynamicImage::from(rgb);
         assert_eq!(1, dynamic.channels.len());
-        // assert_eq!(
-        //     vec![(const { NonZeroU8::new(3).unwrap() }, DynamicPixelKind::U8)],
-        //     dynamic.channel_infos().collect::<Vec<_>>()
-        // );
+        assert_eq!(1, dynamic[0].primitive_size().get());
+        assert_eq!(3, dynamic[0].pixel_elements().get());
         let rgb_back: Image<[u8; 3], 1> = dynamic.try_into().unwrap();
         assert_eq!(rgb_back.into_vec(), vec![[1u8, 2, 3]]);
     }

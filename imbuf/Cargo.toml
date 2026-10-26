@@ -1,6 +1,6 @@
 [package]
 name = "imbuf"
-version = "0.3.4"
+version = "0.4.0"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,10 +11,5 @@ keywords = ["image", "buffer", "ffi", "copy-on-write"]
 categories = ["multimedia::images", "graphics", "computer-vision", "data-structures"]
 
 [dependencies]
+bytemuck.workspace = true
 thiserror.workspace = true
-image_0_25 = { version = "0.25", default-features = false, package = "image", optional = true }
-
-[dev-dependencies]
-image_0_25 = { version = "0.25", default-features = false, package = "image", features = [
-  "png",
-]}

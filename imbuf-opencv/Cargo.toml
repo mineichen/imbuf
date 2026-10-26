@@ -12,6 +12,7 @@ keywords = ["image", "opencv", "ffi", "copy-on-write"]
 categories = ["multimedia::images", "computer-vision"]
 
 [dependencies]
+bytemuck.workspace = true
 imbuf.workspace = true
 log.workspace = true
 opencv = { version = "0.101", default-features = false }

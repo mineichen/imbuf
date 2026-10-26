@@ -18,6 +18,14 @@ This crate provides utilities functions to go from one representation to the oth
 [`ImageChannel`] is a composeable building block for [`Image`]. If you have a special Image kind, where channels are not uniform,
 feel encouraged to add your own typed Image, which implement `TryFrom<DynamicImage>` and `Into<DynamicImage>`.
 
+## Primitives and dynamic channels
+
+[`DynamicImageChannel`] only knows the size of its primitive (e.g. 2 bytes for `u16`). It can therefore be
+viewed as any [`bytemuck::Pod`] primitive with the same size and alignment, e.g. with `ImageChannel::try_from`
+or [`DynamicImageChannel::buffer_flat`]. Custom primitives can implement [`PixelTypePrimitive`]. Primitives
+which aren't `Pod` (e.g. a wrapper around `NonZeroU8`) can be used in [`Image`] and [`ImageChannel`], but can't
+be converted into a [`DynamicImage`].
+
 ## Typed Images
 
 The `Image` struct represents a fully typed Image to support the most common image formats.

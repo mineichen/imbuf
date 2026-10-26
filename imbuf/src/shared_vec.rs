@@ -6,9 +6,10 @@ use std::{
 };
 
 use crate::{
-    ImageChannel, PixelType,
-    channel::{ChannelFactory, ImageChannelVTable, UnsafeImageChannel},
-    pixel_elements::PixelSize,
+    DynamicImageChannel, ImageChannel, PixelType, PixelTypePrimitive,
+    channel::{
+        ChannelFactory, ImageChannelVTable, UnsafeImageChannel, calc_pixel_len_flat, primitive_size,
+    },
 };
 
 /// Internal structure that holds a Vec (as raw parts) and reference counts
@@ -49,9 +50,8 @@ impl<T, const CHANNELS: usize> Clone for SharedVecMetadata<T, CHANNELS> {
     fn clone(&self) -> Self {
         unsafe {
             let shared = &(*self.data_ptr);
-            let slice_idx = self.slice_idx;
-            let _ = shared.slice_refs[slice_idx].fetch_add(1, Ordering::AcqRel) + 1;
-            let _ = shared.total_refs.fetch_add(1, Ordering::AcqRel) + 1;
+            shared.slice_refs[self.slice_idx].fetch_add(1, Ordering::AcqRel);
+            shared.total_refs.fetch_add(1, Ordering::AcqRel);
         }
         Self {
             data_ptr: self.data_ptr,
@@ -61,53 +61,61 @@ impl<T, const CHANNELS: usize> Clone for SharedVecMetadata<T, CHANNELS> {
     }
 }
 
-// Single generic extern "C" functions with const CHANNELS
-// These are instantiated when added to the vtable
-unsafe extern "C" fn clone_shared_vec<T: 'static, const CHANNELS: usize>(
-    image: &UnsafeImageChannel<T>,
-) -> UnsafeImageChannel<T> {
-    let metadata = unsafe { &mut *(image.data.cast::<SharedVecMetadata<T, CHANNELS>>()) };
-
-    UnsafeImageChannel {
-        ptr: image.ptr,
-        width: image.width,
-        height: image.height,
-        vtable: image.vtable,
-        data: Box::into_raw(Box::new(metadata.clone())).cast(),
-        pixel_elements: image.pixel_elements,
-    }
+/// Borrows the metadata of a channel created by `create_shared_channels`
+unsafe fn metadata<T, const CHANNELS: usize>(
+    image: &DynamicImageChannel,
+) -> &SharedVecMetadata<T, CHANNELS> {
+    let data = DynamicImageChannel::get_unsafe(image).data;
+    unsafe { &*(data.cast::<SharedVecMetadata<T, CHANNELS>>()) }
 }
 
-unsafe extern "C" fn make_mut_shared_vec<T: 'static + Clone, const CHANNELS: usize>(
-    image: &mut UnsafeImageChannel<T>,
-) {
-    let metadata = unsafe { &mut *(image.data.cast::<SharedVecMetadata<T, CHANNELS>>()) };
-    let data = metadata.data_ptr;
-    let slice_idx = metadata.slice_idx;
+// Single generic extern "C-unwind" functions with const CHANNELS
+// These are instantiated when added to the vtable
+unsafe extern "C-unwind" fn clone_shared_vec<T: 'static, const CHANNELS: usize>(
+    image: &DynamicImageChannel,
+) -> DynamicImageChannel {
+    let metadata = unsafe { metadata::<T, CHANNELS>(image) };
+    let raw = DynamicImageChannel::get_unsafe(image);
+    let unsafe_ch = UnsafeImageChannel::new_with_vtable(
+        raw.ptr,
+        raw.width,
+        raw.height,
+        raw.pixel_elements,
+        raw.vtable,
+        Box::into_raw(Box::new(metadata.clone())).cast(),
+    );
 
-    let is_unique = unsafe { (*data).slice_refs[slice_idx].load(Ordering::Acquire) == 1 };
+    unsafe { DynamicImageChannel::from_unsafe(unsafe_ch) }
+}
+
+unsafe extern "C-unwind" fn make_mut_shared_vec<T: PixelTypePrimitive, const CHANNELS: usize>(
+    image: &mut DynamicImageChannel,
+) {
+    let metadata = unsafe { metadata::<T, CHANNELS>(image) };
+    let is_unique =
+        unsafe { (*metadata.data_ptr).slice_refs[metadata.slice_idx].load(Ordering::Acquire) == 1 };
 
     if !is_unique {
-        let slice = unsafe {
-            std::slice::from_raw_parts(image.ptr, (image.width.get() * image.height.get()) as usize)
-        };
-        *image = UnsafeImageChannel::new_vec(
-            slice.to_vec(),
-            image.width,
-            image.height,
-            image.pixel_elements,
+        // Safety: The vtable is built for T
+        let copy = unsafe { image.buffer_flat_unchecked::<T>() }.to_vec();
+        // Assigning drops the previous channel, which releases its share of the Vec
+        *image = DynamicImageChannel::from_vec(
+            copy,
+            image.width(),
+            image.height(),
+            image.pixel_elements(),
         );
     }
 }
 
-pub(crate) extern "C" fn drop_shared_vec<T: 'static, const CHANNELS: usize>(
-    image: &mut UnsafeImageChannel<T>,
+pub(crate) unsafe extern "C-unwind" fn drop_shared_vec<T: 'static, const CHANNELS: usize>(
+    image: &mut DynamicImageChannel,
 ) {
+    let data = DynamicImageChannel::get_unsafe(image).data;
     unsafe {
-        let metadata = Box::from_raw(image.data.cast::<SharedVecMetadata<T, CHANNELS>>());
+        let metadata = Box::from_raw(data.cast::<SharedVecMetadata<T, CHANNELS>>());
         let shared = metadata.data_ptr;
-        let slice_idx = metadata.slice_idx;
-        let _ = (*shared).slice_refs[slice_idx].fetch_sub(1, Ordering::AcqRel) - 1;
+        (*shared).slice_refs[metadata.slice_idx].fetch_sub(1, Ordering::AcqRel);
 
         if (*shared).total_refs.fetch_sub(1, Ordering::AcqRel) == 1 {
             drop(Box::from_raw(shared));
@@ -119,46 +127,40 @@ struct SharedVecFactory<T: 'static, const CHANNELS: usize>(PhantomData<(T, [(); 
 
 // Implement ChannelFactory with const VTABLE using associated const
 // PhantomData makes this type unique for each T and CHANNELS combination
-impl<T: 'static + Clone, const CHANNELS: usize> ChannelFactory<T>
+impl<T: PixelTypePrimitive, const CHANNELS: usize> ChannelFactory<T>
     for SharedVecFactory<T, CHANNELS>
 {
-    const VTABLE: &'static ImageChannelVTable<T> = {
+    const VTABLE: &'static ImageChannelVTable = {
         &ImageChannelVTable {
             clone: clone_shared_vec::<T, CHANNELS>,
             make_mut: make_mut_shared_vec::<T, CHANNELS>,
             drop: drop_shared_vec::<T, CHANNELS>,
+            primitive_size: primitive_size::<T>,
         }
     };
 }
 
 /// Create `ImageChannels` from a Vec, sharing the underlying storage
-/// Note: T: Clone is required for vtable creation, but clone/drop don't actually need it
 pub fn create_shared_channels<TP: PixelType, const CHANNELS: usize>(
-    vec: Vec<TP::Primitive>,
+    mut vec: Vec<TP::Primitive>,
     sizes: [(NonZeroU32, NonZeroU32); CHANNELS],
-) -> [ImageChannel<TP>; CHANNELS]
-where
-    TP::Primitive: Clone,
-{
+) -> [ImageChannel<TP>; CHANNELS] {
     assert_eq!(
         vec.len(),
-        sizes.iter().fold(0, |acc, i| acc
-            + i.0.get() as usize
-                * i.1.get() as usize
-                * TP::PixelSize::default().get().get() as usize)
+        sizes
+            .iter()
+            .map(|&(width, height)| calc_pixel_len_flat(width, height, TP::ELEMENTS))
+            .sum::<usize>()
     );
     // Create SharedVecData
-    let mut base = vec.as_ptr();
+    let base = vec.as_mut_ptr();
     let shared_data = Box::new(SharedVecData::<TP::Primitive, CHANNELS>::new(vec));
     let data_ptr = Box::into_raw(shared_data);
+    let mut start = 0;
 
     // Create ImageChannels for each slice
     std::array::from_fn(|i| {
         let (width, height) = sizes[i];
-        let start = width.get() as usize
-            * height.get() as usize
-            * TP::PixelSize::default().get().get() as usize;
-
         let metadata = Box::new(SharedVecMetadata::<TP::Primitive, CHANNELS> {
             data_ptr,
             slice_idx: i,
@@ -168,18 +170,23 @@ where
         let vtable =
             <SharedVecFactory<TP::Primitive, CHANNELS> as ChannelFactory<TP::Primitive>>::VTABLE;
 
-        let unsafe_channel = UnsafeImageChannel::new_with_vtable(
-            base,
+        // Safety: The slice is within the Vec, as the total length is checked above
+        let ptr = unsafe { base.add(start) };
+        start += calc_pixel_len_flat(width, height, TP::ELEMENTS);
+
+        let unsafe_ch = UnsafeImageChannel::new_with_vtable(
+            ptr.cast(),
             width,
             height,
-            TP::PixelSize::default().get(),
+            TP::ELEMENTS,
             vtable,
             metadata_ptr.cast(),
         );
 
+        // Safety: The vtable is built for TP::Primitive with TP::ELEMENTS
         unsafe {
-            base = base.add(start);
-            ImageChannel::from_unsafe(unsafe_channel)
+            let channel = DynamicImageChannel::from_unsafe(unsafe_ch);
+            ImageChannel::from_dynamic_unchecked(channel)
         }
     })
 }
@@ -268,5 +275,19 @@ mod tests {
             channels[0].buffer().as_ptr(),
             channel1_clone.buffer().as_ptr()
         );
+    }
+
+    #[test]
+    fn non_unique_make_mut_copies_all_pixel_elements() {
+        let vec = vec![0u8, 1, 2, 3, 4, 5, 6, 7];
+        let width = NonZeroU32::new(2).unwrap();
+        let height = NonZeroU32::new(1).unwrap();
+        let mut channels = create_shared_channels::<[u8; 2], 2>(vec, [(width, height); 2]);
+        let clone = channels[1].clone();
+
+        channels[1].make_mut()[0] = [8, 9];
+        assert_eq!(channels[1].buffer(), &[[8, 9], [6, 7]]);
+        assert_eq!(clone.buffer(), &[[4, 5], [6, 7]]);
+        assert_eq!(channels[0].buffer(), &[[0, 1], [2, 3]]);
     }
 }

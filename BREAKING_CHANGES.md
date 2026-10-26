@@ -4,11 +4,6 @@ Deferred breaking changes for the next breaking `imbuf` release (0.4.0).
 `imbuf-image` and `imbuf-opencv` are not released yet, so changes to those
 crates are tracked in `RELEASE_CHANGES.md` instead.
 
-- Add `#[non_exhaustive]` to `DynamicImageChannel`, so new primitives (e.g.
-  `f64`, `u32`, `i16`) can be added without breaking exhaustive matches
-  downstream. Matches then require a wildcard arm.
-- Remove the deprecated `external` module (`image_0_25` integration),
-  deprecated in 0.3.4 in favor of the `imbuf-image` crate.
 - (Candidate) `TryFrom<DynamicImage> for Image<T, N>` currently ignores
   channels beyond `N` (e.g. taking RGB from RGBA, see `tests/dynamic.rs`).
   Require an exact channel count instead and add an explicit method for taking

@@ -1,177 +1,38 @@
 use std::num::NonZeroU8;
 
-use crate::{
-    ImageChannel,
-    dynamic::DynamicImageChannel,
-    pixel_elements::{ComptimeSize, PixelSize, RuntimeSize},
-};
+/// Element of a pixel (e.g. `u8` for `[u8; 3]`), which is stored in the buffer of an [`ImageChannel`](crate::ImageChannel).
+///
+/// This trait can be implemented for custom types. Zero sized types are rejected at compile time.
+/// Only primitives which implement [`bytemuck::Pod`] can be converted from and into a
+/// [`DynamicImageChannel`](crate::DynamicImageChannel), because the dynamic channel only
+/// knows the size of its primitive and allows to reinterpret its bytes.
+pub trait PixelTypePrimitive: Copy + PartialEq + Send + Sync + 'static {}
 
-/// Removes all compile time hints, of how many channels a pixel persists
-/// This is primarily used in `DynamicImageChannel`
-#[derive(Clone, Copy, Default)]
-pub struct DynamicSize<T: PixelTypePrimitive>(std::marker::PhantomData<T>);
+impl PixelTypePrimitive for u8 {}
+impl PixelTypePrimitive for i8 {}
+impl PixelTypePrimitive for u16 {}
+impl PixelTypePrimitive for i16 {}
+impl PixelTypePrimitive for u32 {}
+impl PixelTypePrimitive for i32 {}
+impl PixelTypePrimitive for u64 {}
+impl PixelTypePrimitive for i64 {}
+impl PixelTypePrimitive for usize {}
+impl PixelTypePrimitive for isize {}
+impl PixelTypePrimitive for f32 {}
+impl PixelTypePrimitive for f64 {}
 
-impl<T: PixelTypePrimitive> RuntimePixelType for DynamicSize<T> {
-    type Primitive = T;
-    type PixelSize = RuntimeSize;
-}
-
-pub trait PixelTypePrimitive:
-    Clone + PartialEq + Send + Sync + 'static + crate::seal::SealedPrimitive
-{
-    fn into_runtime_channel(i: ImageChannel<DynamicSize<Self>>) -> DynamicImageChannel;
-
-    /// # Errors
-    /// Returns `Err` if the dynamic image channel is not compatible with the pixel type.
-    fn try_from_dynamic_image(
-        channel: DynamicImageChannel,
-    ) -> Result<ImageChannel<DynamicSize<Self>>, DynamicImageChannel>;
-
-    fn try_from_dynamic_image_ref(
-        channel: &DynamicImageChannel,
-    ) -> Option<&ImageChannel<DynamicSize<Self>>>;
-    fn try_from_dynamic_image_mut(
-        channel: &mut DynamicImageChannel,
-    ) -> Option<&mut ImageChannel<DynamicSize<Self>>>;
-}
-
-impl PixelTypePrimitive for u8 {
-    fn into_runtime_channel(i: ImageChannel<DynamicSize<Self>>) -> DynamicImageChannel {
-        DynamicImageChannel::U8(i)
-    }
-
-    fn try_from_dynamic_image(
-        channel: DynamicImageChannel,
-    ) -> Result<ImageChannel<DynamicSize<Self>>, DynamicImageChannel> {
-        if let DynamicImageChannel::U8(channel) = channel {
-            Ok(channel)
-        } else {
-            Err(channel)
-        }
-    }
-
-    fn try_from_dynamic_image_ref(
-        channel: &DynamicImageChannel,
-    ) -> Option<&ImageChannel<DynamicSize<Self>>> {
-        if let DynamicImageChannel::U8(channel) = channel {
-            Some(channel)
-        } else {
-            None
-        }
-    }
-
-    fn try_from_dynamic_image_mut(
-        channel: &mut DynamicImageChannel,
-    ) -> Option<&mut ImageChannel<DynamicSize<Self>>> {
-        if let DynamicImageChannel::U8(channel) = channel {
-            Some(channel)
-        } else {
-            None
-        }
-    }
-}
-impl PixelTypePrimitive for u16 {
-    fn into_runtime_channel(i: ImageChannel<DynamicSize<Self>>) -> DynamicImageChannel {
-        DynamicImageChannel::U16(i)
-    }
-    fn try_from_dynamic_image(
-        channel: DynamicImageChannel,
-    ) -> Result<ImageChannel<DynamicSize<Self>>, DynamicImageChannel> {
-        if let DynamicImageChannel::U16(channel) = channel {
-            Ok(channel)
-        } else {
-            Err(channel)
-        }
-    }
-
-    fn try_from_dynamic_image_ref(
-        channel: &DynamicImageChannel,
-    ) -> Option<&ImageChannel<DynamicSize<Self>>> {
-        if let DynamicImageChannel::U16(channel) = channel {
-            Some(channel)
-        } else {
-            None
-        }
-    }
-
-    fn try_from_dynamic_image_mut(
-        channel: &mut DynamicImageChannel,
-    ) -> Option<&mut ImageChannel<DynamicSize<Self>>> {
-        if let DynamicImageChannel::U16(channel) = channel {
-            Some(channel)
-        } else {
-            None
-        }
-    }
-}
-
-impl PixelTypePrimitive for f32 {
-    fn into_runtime_channel(i: ImageChannel<DynamicSize<Self>>) -> DynamicImageChannel {
-        DynamicImageChannel::F32(i)
-    }
-    fn try_from_dynamic_image(
-        channel: DynamicImageChannel,
-    ) -> Result<ImageChannel<DynamicSize<Self>>, DynamicImageChannel> {
-        if let DynamicImageChannel::F32(channel) = channel {
-            Ok(channel)
-        } else {
-            Err(channel)
-        }
-    }
-
-    fn try_from_dynamic_image_ref(
-        channel: &DynamicImageChannel,
-    ) -> Option<&ImageChannel<DynamicSize<Self>>> {
-        if let DynamicImageChannel::F32(channel) = channel {
-            Some(channel)
-        } else {
-            None
-        }
-    }
-
-    fn try_from_dynamic_image_mut(
-        channel: &mut DynamicImageChannel,
-    ) -> Option<&mut ImageChannel<DynamicSize<Self>>> {
-        if let DynamicImageChannel::F32(channel) = channel {
-            Some(channel)
-        } else {
-            None
-        }
-    }
-}
-
-pub trait RuntimePixelType: Clone + Sized + 'static {
+/// A pixel, which is either a [`PixelTypePrimitive`] (e.g. `u8`) or an array of them (e.g. `[u8; 3]`)
+pub trait PixelType: Clone + Sized + Send + Sync + 'static + crate::seal::SealedPixelType {
     type Primitive: PixelTypePrimitive;
-    type PixelSize: PixelSize + Default;
-}
-
-pub trait PixelType: RuntimePixelType + Clone + Sized + 'static {
     const ELEMENTS: NonZeroU8;
 }
 
-impl<T: PixelTypePrimitive> RuntimePixelType for T {
-    type Primitive = T;
-    type PixelSize = ComptimeSize<1>;
-}
-
-impl<T: PixelTypePrimitive, const PIXEL_ELEMENTS: usize> RuntimePixelType for [T; PIXEL_ELEMENTS] {
-    type Primitive = T;
-    type PixelSize = ComptimeSize<PIXEL_ELEMENTS>;
-}
-
 impl<T: PixelTypePrimitive> PixelType for T {
+    type Primitive = T;
     const ELEMENTS: NonZeroU8 = NonZeroU8::MIN;
 }
 
 impl<T: PixelTypePrimitive, const PIXEL_ELEMENTS: usize> PixelType for [T; PIXEL_ELEMENTS] {
-    const ELEMENTS: NonZeroU8 = {
-        const {
-            assert!(
-                PIXEL_ELEMENTS <= 255,
-                "PIXEL_ELEMENTS must be less than 256"
-            );
-            #[allow(clippy::cast_possible_truncation)]
-            NonZeroU8::new(PIXEL_ELEMENTS as u8).unwrap()
-        }
-    };
+    type Primitive = T;
+    const ELEMENTS: NonZeroU8 = const { crate::unwrap_usize_to_nonzero_u8(PIXEL_ELEMENTS) };
 }
