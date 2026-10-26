@@ -1,7 +1,7 @@
 use std::num::NonZeroU8;
 
 use image::ImageBuffer;
-use imbuf::{Image, ImageChannel, PixelType};
+use imbuf::{GenericDynamicImage, GenericImage, GenericImageChannel, PixelType};
 
 use crate::{
     non_zero_u8,
@@ -98,10 +98,10 @@ impl_from_borrowed_image_buffer!(
     ImageRgba32F,
 );
 
-impl<'a> TryFrom<&'a imbuf::DynamicImage> for DynamicRefImage<'a> {
+impl<'a> TryFrom<&'a GenericDynamicImage<'_>> for DynamicRefImage<'a> {
     type Error = IncompatibleLayoutError;
 
-    fn try_from(value: &'a imbuf::DynamicImage) -> Result<Self, Self::Error> {
+    fn try_from(value: &'a GenericDynamicImage<'_>) -> Result<Self, Self::Error> {
         let channel = value.first();
         let pixel_elements = channel.pixel_elements();
         let error = IncompatibleLayoutError {
@@ -151,7 +151,7 @@ impl<'a> TryFrom<&'a imbuf::DynamicImage> for DynamicRefImage<'a> {
     }
 }
 
-impl ImbufAsImage for imbuf::DynamicImage {
+impl ImbufAsImage for GenericDynamicImage<'_> {
     type Result<'a>
         = std::result::Result<DynamicRefImage<'a>, IncompatibleLayoutError>
     where
@@ -162,7 +162,7 @@ impl ImbufAsImage for imbuf::DynamicImage {
     }
 }
 
-impl ImbufAsImageMut for imbuf::DynamicImage {
+impl ImbufAsImageMut for GenericDynamicImage<'_> {
     type Result<'a>
         = std::result::Result<DynamicRefImageMut<'a>, IncompatibleLayoutError>
     where
@@ -173,10 +173,10 @@ impl ImbufAsImageMut for imbuf::DynamicImage {
     }
 }
 
-impl<'a> TryFrom<&'a mut imbuf::DynamicImage> for DynamicRefImageMut<'a> {
+impl<'a> TryFrom<&'a mut GenericDynamicImage<'_>> for DynamicRefImageMut<'a> {
     type Error = IncompatibleLayoutError;
 
-    fn try_from(value: &'a mut imbuf::DynamicImage) -> Result<Self, Self::Error> {
+    fn try_from(value: &'a mut GenericDynamicImage<'_>) -> Result<Self, Self::Error> {
         let pixel_elements = value.first().pixel_elements();
         let error = IncompatibleLayoutError {
             channels: Some(non_zero_u8(value.len())),
@@ -239,7 +239,7 @@ pub trait ImbufIntoImage {
 
 macro_rules! impl_imbuf_to_image {
     ($src:ty, $variant:ident) => {
-        impl ImbufAsImage for Image<$src, 1> {
+        impl ImbufAsImage for GenericImage<'_, $src, 1> {
             type Result<'a>
                 = DynamicRefImage<'a>
             where
@@ -250,7 +250,7 @@ macro_rules! impl_imbuf_to_image {
             }
         }
 
-        impl ImbufAsImageMut for Image<$src, 1> {
+        impl ImbufAsImageMut for GenericImage<'_, $src, 1> {
             type Result<'a>
                 = DynamicRefImageMut<'a>
             where
@@ -261,7 +261,7 @@ macro_rules! impl_imbuf_to_image {
             }
         }
 
-        impl ImbufIntoImage for Image<$src, 1> {
+        impl ImbufIntoImage for GenericImage<'_, $src, 1> {
             type Result = image::DynamicImage;
 
             fn into_rust_image_dynamic(self) -> Self::Result {
@@ -334,7 +334,9 @@ where
     ImageBuffer::from_raw(width, height, buffer).expect("Incompatible buffer size")
 }
 
-fn ref_image<P, TP>(channel: &ImageChannel<TP>) -> ImageBuffer<P, &[TP::Primitive]>
+fn ref_image<'a, P, TP>(
+    channel: &'a GenericImageChannel<'_, TP>,
+) -> ImageBuffer<P, &'a [TP::Primitive]>
 where
     P: image::Pixel<Subpixel = TP::Primitive>,
     TP: PixelType,
@@ -344,7 +346,9 @@ where
         .expect("Incompatible buffer size")
 }
 
-fn ref_image_mut<P, TP>(channel: &mut ImageChannel<TP>) -> ImageBuffer<P, &mut [TP::Primitive]>
+fn ref_image_mut<'a, P, TP>(
+    channel: &'a mut GenericImageChannel<'_, TP>,
+) -> ImageBuffer<P, &'a mut [TP::Primitive]>
 where
     P: image::Pixel<Subpixel = TP::Primitive>,
     TP: PixelType,
@@ -398,6 +402,38 @@ mod tests {
             expected,
             test_encode(dynamic.as_rust_image_dynamic().unwrap())
         );
+    }
+
+    #[test]
+    fn borrowed_imbuf_image_as_rust_image() {
+        let mut data = [[1u8, 2, 3]];
+        let data_ptr = data.as_ptr().cast::<u8>();
+        let mut image = imbuf::ImageRef::<[u8; 3], 1>::new_slice_mut(
+            &mut data,
+            NonZeroU32::MIN,
+            NonZeroU32::MIN,
+        );
+        let image::DynamicImage::ImageRgb8(_) = image.view().into_rust_image_dynamic() else {
+            panic!("Expected Rgb8");
+        };
+        let DynamicRefImageMut::ImageRgb8(mut buffer) = image.as_rust_image_dynamic_mut() else {
+            panic!("Expected Rgb8");
+        };
+        assert_eq!(buffer.as_ptr(), data_ptr);
+        buffer.get_pixel_mut(0, 0).0[0] = 4;
+
+        let mut dynamic = imbuf::GenericDynamicImage::from(image);
+        let DynamicRefImage::ImageRgb8(buffer) = dynamic.as_rust_image_dynamic().unwrap() else {
+            panic!("Expected Rgb8");
+        };
+        assert_eq!(buffer.as_ptr(), data_ptr);
+        let Ok(DynamicRefImageMut::ImageRgb8(mut buffer)) = dynamic.as_rust_image_dynamic_mut()
+        else {
+            panic!("Expected Rgb8");
+        };
+        buffer.get_pixel_mut(0, 0).0[1] = 5;
+        drop(dynamic);
+        assert_eq!(data, [[4, 5, 3]]);
     }
 
     #[test]

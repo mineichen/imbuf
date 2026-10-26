@@ -6,6 +6,8 @@ Pending changes for the upcoming releases of the unreleased `imbuf-image` /
 
 ## imbuf-image 0.1.0 (unreleased)
 
+- Implement `ImbufAsImage`, `ImbufAsImageMut` and `ImbufIntoImage` for borrowed images
+  (`imbuf::GenericImage<'_, _, 1>` and `imbuf::GenericDynamicImage<'_>`, imbuf 0.4.0).
 - Split the extension traits into infallible and fallible variants, replacing
   the `type Result<'a>` "infallible-or-`Result`" GAT, which cannot be reasoned
   about in generic code and makes third-party implementations harder:
@@ -31,6 +33,9 @@ Pending changes for the upcoming releases of the unreleased `imbuf-image` /
 
 ## imbuf-opencv 0.1.0 (unreleased)
 
+- Implement `ImbufAsOpencv` / `ImbufAsOpencvMut` for borrowed images and channels
+  (`GenericImage<'_, _, 1>`, `GenericImageChannel<'_, _>`, `GenericDynamicImage<'_>`,
+  `GenericDynamicImageChannel<'_>`, imbuf 0.4.0).
 - Construct the channels for imported `Mat`s with the public
   `DynamicImageChannel::from_unsafe` (imbuf 0.4.0) instead of a `transmute` from
   `UnsafeImageChannel`. Requires the `imbuf` dependency 0.4.0.

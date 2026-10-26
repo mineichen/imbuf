@@ -2,7 +2,7 @@
 
 # This crate provides flexible image buffers
 
-- Allows transforming known [`Images`](ImageChannels) (e.g. RGB32F) to typeless [`DynamicImages`](DynamicImage) and back (without a single buffer copy)
+- Allows transforming known [`Images`](GenericImage) (e.g. RGB32F) to typeless [`DynamicImages`](DynamicImage) and back (without a single buffer copy)
 - Ability to support buffers from other libraries like "opencv" without copying buffers
 - Copy on write capability, so buffers can be reused if the internal representation allows it
 - FFI compatible
@@ -15,7 +15,7 @@ This crate provides utilities functions to go from one representation to the oth
 
 ## Channels
 
-[`ImageChannel`] is a composeable building block for [`Image`]. If you have a special Image kind, where channels are not uniform,
+[`GenericImageChannel`] is a composeable building block for [`GenericImage`]. If you have a special Image kind, where channels are not uniform,
 feel encouraged to add your own typed Image, which implement `TryFrom<DynamicImage>` and `Into<DynamicImage>`.
 
 ## Primitives and dynamic channels
@@ -30,13 +30,43 @@ be converted into a [`DynamicImage`].
 
 The `Image` struct represents a fully typed Image to support the most common image formats.
 
-| Type                   | Description                                            |
-| ---------------------- | ------------------------------------------------------ |
-| `Image<u8, 3>`         | RGB8 planar                                            |
-| `Image<[u8; 4], 1>`    | RGBA8 interleaved                                      |
-| `Image<f32, 2>`        | LUMAA32F planar                                        |
-| `ImageRef<u8, 1>`      | LUMA8, where buffers are borrowed                      |
-| `ImageMut<[u16;3], 1>` | RGB16 Interleaved, where buffers are mutually borrowed |
+| Type                     | Description                                                   |
+| ------------------------ | ------------------------------------------------------------- |
+| `Image<u8, 3>`           | RGB8 planar                                                   |
+| `Image<[u8; 4], 1>`      | RGBA8 interleaved                                             |
+| `Image<f32, 2>`          | LUMAA32F planar                                               |
+| `ImageRef<'a, u8, 1>`    | LUMA8, where buffers might be borrowed for `'a`               |
+| `ImageRef<'a, [u16; 3], 1>` | RGB16 interleaved, where buffers might be borrowed for `'a` |
+
+## Owned and borrowed images
+
+Channels and images have a lifetime `'a`, which is `'static` if they own their buffers
+([`ImageChannel`], [`Image`], [`DynamicImageChannel`], [`DynamicImage`]). Borrowed buffers are
+represented by the same types with a shorter lifetime ([`GenericImageChannel`], [`ImageRef`],
+[`GenericDynamicImageChannel`], [`GenericDynamicImage`]), so they can be created ad-hoc, e.g. from a
+slice of another library, without having an owned `ImageChannel` to refer to.
+
+- Shared borrows (e.g. [`GenericImage::new_slice`], [`GenericImage::view`] or `ImageRef::try_from(&dynamic)`)
+  copy the buffer on mutable access (e.g. [`GenericImage::make_mut`]).
+- Exclusive borrows (e.g. [`GenericImage::new_slice_mut`], [`GenericImage::view_mut`] or
+  `ImageRef::try_from(&mut dynamic)`) write into the borrowed buffer. Clones copy the buffer.
+
+```rust
+use std::num::NonZeroU32;
+use imbuf::{GenericDynamicImage, ImageRef};
+
+let mut data = [1u8, 2, 3, 4];
+let two = NonZeroU32::new(2).unwrap();
+{
+    let mut image = ImageRef::<u8, 1>::new_slice_mut(&mut data, two, two);
+    image.make_mut()[0][0] = 5;
+    // Borrowed images can be converted to dynamic images and back
+    let dynamic = GenericDynamicImage::from(image);
+    let image = ImageRef::<u8, 1>::try_from(&dynamic).unwrap();
+    assert_eq!(image.buffer(), &[5, 2, 3, 4]);
+}
+assert_eq!(data, [5, 2, 3, 4]);
+```
 
 ## Example which demonstrates buffer reuse
 

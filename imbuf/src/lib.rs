@@ -10,10 +10,14 @@ mod image;
 mod pixel;
 mod shared_vec;
 mod vec;
+mod view;
 
-pub use channel::{BorrowableImageChannel, ImageChannel, ImageChannelVTable, UnsafeImageChannel};
-pub use dynamic::{DynamicImage, DynamicImageChannel, IncompatibleImageError};
-pub use image::{Image, ImageChannels, ImageMut, ImageRef};
+pub use channel::{GenericImageChannel, ImageChannel, ImageChannelVTable, UnsafeImageChannel};
+pub use dynamic::{
+    DynamicImage, DynamicImageChannel, GenericDynamicImage, GenericDynamicImageChannel,
+    IncompatibleImageError,
+};
+pub use image::{GenericImage, Image, ImageRef};
 pub use pixel::{PixelType, PixelTypePrimitive};
 
 const fn unwrap_usize_to_nonzero_u8(value: usize) -> NonZeroU8 {
@@ -23,7 +27,7 @@ const fn unwrap_usize_to_nonzero_u8(value: usize) -> NonZeroU8 {
 }
 
 mod seal {
-    use crate::{ImageChannel, PixelType, PixelTypePrimitive};
+    use crate::PixelTypePrimitive;
 
     /// `PixelType` is only implemented for primitives and arrays of primitives.
     /// This crate casts between buffers of pixels and buffers of their primitives,
@@ -31,9 +35,4 @@ mod seal {
     pub trait SealedPixelType {}
     impl<T: PixelTypePrimitive> SealedPixelType for T {}
     impl<T: PixelTypePrimitive, const PIXEL_ELEMENTS: usize> SealedPixelType for [T; PIXEL_ELEMENTS] {}
-
-    pub trait SealedImageChannel {}
-    impl<T: PixelType> SealedImageChannel for ImageChannel<T> {}
-    impl<T: PixelType> SealedImageChannel for &ImageChannel<T> {}
-    impl<T: PixelType> SealedImageChannel for &mut ImageChannel<T> {}
 }

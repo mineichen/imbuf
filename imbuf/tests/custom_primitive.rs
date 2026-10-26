@@ -4,8 +4,8 @@ use std::{
 };
 
 use imbuf::{
-    DynamicImage, DynamicImageChannel, Image, ImageChannel, ImageChannelVTable, PixelTypePrimitive,
-    UnsafeImageChannel,
+    DynamicImage, DynamicImageChannel, GenericDynamicImageChannel, Image, ImageChannel,
+    ImageChannelVTable, PixelTypePrimitive, UnsafeImageChannel,
 };
 
 const ONE: NonZeroU32 = NonZeroU32::MIN;
@@ -82,13 +82,15 @@ fn non_pod_primitive_works_with_typed_images() {
 struct AlignedBytes([u8; 8]);
 static BYTES: AlignedBytes = AlignedBytes([0, 1, 2, 3, 4, 5, 6, 7]);
 
-unsafe extern "C-unwind" fn panicking_clone(_: &DynamicImageChannel) -> DynamicImageChannel {
+unsafe extern "C-unwind" fn panicking_clone<'a>(
+    _: &GenericDynamicImageChannel<'a>,
+) -> GenericDynamicImageChannel<'a> {
     panic!("The static buffer cannot be cloned")
 }
-unsafe extern "C-unwind" fn panicking_make_mut(_: &mut DynamicImageChannel) {
+unsafe extern "C-unwind" fn panicking_make_mut(_: &mut GenericDynamicImageChannel<'_>) {
     panic!("The static buffer is read only")
 }
-unsafe extern "C-unwind" fn noop_drop(_: &mut DynamicImageChannel) {}
+unsafe extern "C-unwind" fn noop_drop(_: &mut GenericDynamicImageChannel<'_>) {}
 extern "C-unwind" fn four_bytes() -> NonZeroUsize {
     NonZeroUsize::new(4).unwrap()
 }
