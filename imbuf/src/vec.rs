@@ -83,7 +83,7 @@ mod tests {
         let width = NonZeroU32::new(2).unwrap();
         let height = NonZeroU32::new(3).unwrap();
 
-        let planar = Image::<u8, 3>::from_flat_interleaved(&data, (width, height));
+        let planar = Image::<u8, 3>::from_flat_interleaved(&data, width, height);
         let interleaved_direct = Image::<[u8; 3], 1>::new_vec_flat(data, width, height);
         let interleaved_from_planar = Image::<[u8; 3], 1>::from_planar_image(&planar);
 
