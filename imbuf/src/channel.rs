@@ -231,7 +231,7 @@ impl<'a, TP: PixelType> ImageChannelView<'a, TP> {
 
     pub fn make_mut(&mut self) -> &mut [TP] {
         let len = self.len();
-        let flat = self.primitive_make_mut();
+        let flat = self.make_mut_flat();
         // Safety: The flat buffer contains `len` pixels with `TP::ELEMENTS` primitives each
         unsafe { slice::from_raw_parts_mut(flat.as_mut_ptr().cast::<TP>(), len) }
     }
@@ -275,9 +275,9 @@ impl<'a, TP: PixelType> ImageChannelView<'a, TP> {
         bytemuck::cast_slice(self.buffer_flat())
     }
 
-    pub fn primitive_make_mut(&mut self) -> &mut [TP::Primitive] {
+    pub fn make_mut_flat(&mut self) -> &mut [TP::Primitive] {
         self.debug_assert_layout();
-        unsafe { self.0.primitive_make_mut_unchecked() }
+        unsafe { self.0.make_mut_flat_unchecked() }
     }
 
     #[must_use]
@@ -691,10 +691,10 @@ mod tests {
     where
         TP::Primitive: Default + Eq + Debug,
     {
-        image.primitive_make_mut()[0] = TP::Primitive::default();
+        image.make_mut_flat()[0] = TP::Primitive::default();
         let clone = image.clone();
-        assert_eq!(image.primitive_make_mut()[0], TP::Primitive::default());
-        image.primitive_make_mut()[0] = TP::Primitive::default();
+        assert_eq!(image.make_mut_flat()[0], TP::Primitive::default());
+        image.make_mut_flat()[0] = TP::Primitive::default();
 
         assert_eq!(image, clone);
     }
@@ -769,7 +769,7 @@ mod tests {
             NonZeroU32::MIN,
         );
         let mut dynamic = DynamicImageChannelView::from(view);
-        dynamic.primitive_make_mut::<u8>().unwrap()[1] = 3;
+        dynamic.make_mut_flat::<u8>().unwrap()[1] = 3;
         let typed = ImageChannelView::<u8>::try_from(dynamic).unwrap();
         assert_eq!(typed.buffer(), &[1, 3]);
         drop(typed);

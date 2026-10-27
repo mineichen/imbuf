@@ -53,7 +53,7 @@ fn pod_primitive_can_be_viewed_as_other_primitive_of_same_size() {
     let mut dynamic = DynamicImageChannel::from(channel);
 
     assert_eq!(dynamic.buffer_flat::<u8>(), Some(&[1, 2][..]));
-    dynamic.primitive_make_mut::<u8>().unwrap()[0] = 3;
+    dynamic.make_mut_flat::<u8>().unwrap()[0] = 3;
 
     let as_u8 = ImageChannel::<u8>::try_from(dynamic).unwrap();
     assert_eq!(as_u8.buffer(), &[3, 2]);
@@ -136,7 +136,7 @@ fn panics_in_vtable_propagate() {
     assert!(catch_unwind(AssertUnwindSafe(|| channel.clone())).is_err());
     assert!(
         catch_unwind(AssertUnwindSafe(|| channel
-            .primitive_make_mut::<Rgba8>()
+            .make_mut_flat::<Rgba8>()
             .is_some()))
         .is_err()
     );

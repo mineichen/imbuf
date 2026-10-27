@@ -13,7 +13,7 @@ struct SliceFactory;
 /// Exclusive borrow of a buffer. `clone` copies the buffer.
 ///
 /// `data` is either null (the buffer is exclusive) or points to the borrowed
-/// `DynamicImageChannelView`, whose `make_mut` is called before writing into its buffer.
+/// `GenericDynamicImageChannel`, whose `make_mut` is called before writing into its buffer.
 struct SliceMutFactory;
 
 /// # Safety
