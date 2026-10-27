@@ -63,7 +63,7 @@ pub(crate) unsafe fn slice_mut_channel<'a, T: PixelTypePrimitive>(
 impl<T: PixelTypePrimitive> ChannelFactory<T> for SliceFactory {
     const VTABLE: &'static ImageChannelVTable = &ImageChannelVTable {
         clone: clone_slice_channel,
-        make_mut: copy_into_vec::<T>,
+        make_mut: copy_into_arc::<T>,
         drop: noop_drop,
         primitive_size: primitive_size::<T>,
     };
@@ -95,20 +95,25 @@ unsafe extern "C-unwind" fn clone_slice_channel<'a>(
     unsafe { DynamicImageChannelView::from_unsafe(raw) }
 }
 
-unsafe extern "C-unwind" fn copy_into_vec<T: PixelTypePrimitive>(
+unsafe extern "C-unwind" fn copy_into_arc<T: PixelTypePrimitive>(
     image: &mut DynamicImageChannelView<'_>,
 ) {
     // Safety: The vtable is built for T
-    let copy = unsafe { image.buffer_flat_unchecked::<T>() }.to_vec();
-    *image =
-        DynamicImageChannel::from_vec(copy, image.width(), image.height(), image.pixel_elements());
+    let copy = unsafe { image.buffer_flat_unchecked::<T>() };
+    *image = DynamicImageChannel::from_arc(
+        copy.into(),
+        image.width(),
+        image.height(),
+        image.pixel_elements(),
+    );
 }
 
 unsafe extern "C-unwind" fn make_original_mut(image: &mut DynamicImageChannelView<'_>) {
     // Safety: The layout of the buffer doesn't change
     let raw = unsafe { DynamicImageChannelView::get_unsafe_mut(image) };
     let original = raw.data.cast::<DynamicImageChannelView<'_>>();
-    if !original.is_null() {
+    let created_from_slice = original.is_null();
+    if !created_from_slice {
         // Safety: The original channel is exclusively borrowed by this channel
         let original = unsafe { &mut *original };
         original.make_exclusive();
