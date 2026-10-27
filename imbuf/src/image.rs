@@ -99,13 +99,13 @@ impl<const CHANNELS: usize, T: PixelType> Image<T, CHANNELS> {
         T: PixelTypePrimitive + Copy,
     {
         let (width, height) = i.dimensions();
-        Self::from_flat_interleaved(i.buffer_flat(), (width, height))
+        Self::from_flat_interleaved(i.buffer_flat(), width, height)
     }
 
     /// # Panics
     /// Panics if the buffer size is not compatible with the width, height, and channel count.
     #[must_use]
-    pub fn from_flat_interleaved(v: &[T], (width, height): (NonZeroU32, NonZeroU32)) -> Self
+    pub fn from_flat_interleaved(v: &[T], width: NonZeroU32, height: NonZeroU32) -> Self
     where
         T: Copy,
     {
@@ -608,7 +608,7 @@ mod tests {
     fn luma_from_interleaved() {
         let two = NonZeroU32::new(2).unwrap();
         let interleaved_image =
-            crate::Image::from_flat_interleaved(&[0u8, 64u8, 128u8, 192u8], (two, two));
+            crate::Image::from_flat_interleaved(&[0u8, 64u8, 128u8, 192u8], two, two);
         assert_eq!(interleaved_image.buffers(), [[0u8, 64u8, 128u8, 192u8]]);
         assert_eq!(interleaved_image.dimensions(), (two, two));
     }
@@ -616,7 +616,7 @@ mod tests {
     fn from_flat_interleaved_image() {
         let two = NonZeroU32::new(2).unwrap();
         let image: crate::Image<u8, 3> =
-            Image::from_flat_interleaved((0..12).collect::<Vec<_>>().as_slice(), (two, two));
+            Image::from_flat_interleaved((0..12).collect::<Vec<_>>().as_slice(), two, two);
         assert_eq!(
             image.buffers(),
             [[0u8, 3, 6, 9], [1, 4, 7, 10], [2, 5, 8, 11]]

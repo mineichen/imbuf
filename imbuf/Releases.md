@@ -7,6 +7,7 @@
   - Add `ImageChannelView::new_slice`/`new_slice_mut`, `ImageChannelView::view`/`view_mut` and the same methods on `ImageView`. Shared borrows copy the buffer on mutable access, exclusive borrows write into the borrowed buffer and copy it on `clone`.
   - The functions of `ImageChannelVTable` receive a `DynamicImageChannelView<'a>` and have to be generic over `'a` (e.g. `unsafe extern "C-unwind" fn clone<'a>(&DynamicImageChannelView<'a>) -> DynamicImageChannelView<'a>`).
   - `DynamicImageChannelView::from_unsafe` and `ImageChannelView::new_with_vtable` create channels of any lifetime, whose buffer has to stay valid for `'a`.
+- Breaking: change `from_flat_interleaved` to work with two params width and height instead of a tuple of the two
 - Breaking: `DynamicImageChannel` is a struct instead of an enum (`U8`, `U16`, `F32`). It only knows the size of its primitive (`DynamicImageChannel::primitive_size`), so its buffer can be viewed as any `bytemuck::Pod` primitive with the same size and alignment.
   - `DynamicImageChannel::buffer_flat::<T>` and `DynamicImageChannel::primitive_make_mut::<T>` return `None` if the size or alignment of `T` doesn't match.
   - `DynamicImageChannel::try_cast`, `DynamicImageChannel::try_cast_mut` and `TryFrom<DynamicImageChannel> for ImageChannel<TP>` (incl. `&`/`&mut`) check `pixel_elements`, the primitive size and the alignment.
