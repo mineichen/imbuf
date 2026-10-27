@@ -12,7 +12,7 @@ use std::{
 use bytemuck::{NoUninit, Pod};
 
 use crate::{
-    dynamic::{DynamicImageChannel, GenericDynamicImageChannel},
+    dynamic::{DynamicImageChannel, DynamicImageChannelView},
     pixel::PixelType,
 };
 
@@ -21,27 +21,27 @@ use crate::{
 ///
 /// The buffer is valid for the lifetime `'a`. Channels which own their buffer (e.g. created by
 /// [`ImageChannel::new_vec`]) are `'static` (see [`ImageChannel`]). Borrowed channels are created
-/// with [`GenericImageChannel::new_slice`], [`GenericImageChannel::view`] and their `mut`
+/// with [`ImageChannelView::new_slice`], [`ImageChannelView::view`] and their `mut`
 /// counterparts. A borrowed channel can't outlive the buffer:
 ///
 /// ```compile_fail,E0597
 /// use std::num::NonZeroU32;
-/// use imbuf::{GenericImageChannel, ImageChannel};
+/// use imbuf::{ImageChannelView, ImageChannel};
 ///
 /// let owned: ImageChannel<u8> = {
 ///     let data = vec![1u8];
-///     // `GenericImageChannel<'_, u8>` can't be converted into `GenericImageChannel<'static, u8>`
-///     GenericImageChannel::new_slice(&data, NonZeroU32::MIN, NonZeroU32::MIN)
+///     // `ImageChannelView<'_, u8>` can't be converted into `ImageChannelView<'static, u8>`
+///     ImageChannelView::new_slice(&data, NonZeroU32::MIN, NonZeroU32::MIN)
 /// };
 /// ```
-// Repr transparent is important for casting between GenericImageChannel and GenericDynamicImageChannel
+// Repr transparent is important for casting between ImageChannelView and DynamicImageChannelView
 #[repr(transparent)]
-pub struct GenericImageChannel<'a, TP: PixelType>(GenericDynamicImageChannel<'a>, PhantomData<TP>);
+pub struct ImageChannelView<'a, TP: PixelType>(DynamicImageChannelView<'a>, PhantomData<TP>);
 
-/// [`GenericImageChannel`] which owns its buffer (or shares it with other owners)
-pub type ImageChannel<TP> = GenericImageChannel<'static, TP>;
+/// [`ImageChannelView`] which owns its buffer (or shares it with other owners)
+pub type ImageChannel<TP> = ImageChannelView<'static, TP>;
 
-impl<TP: PixelType> Clone for GenericImageChannel<'_, TP> {
+impl<TP: PixelType> Clone for ImageChannelView<'_, TP> {
     fn clone(&self) -> Self {
         // Safety: The vtable clones the channel with the same primitive and pixel_elements
         let clone = unsafe { Self::from_dynamic_unchecked(self.0.clone()) };
@@ -50,7 +50,7 @@ impl<TP: PixelType> Clone for GenericImageChannel<'_, TP> {
     }
 }
 
-impl<TP: PixelType> PartialEq for GenericImageChannel<'_, TP> {
+impl<TP: PixelType> PartialEq for ImageChannelView<'_, TP> {
     fn eq(&self, other: &Self) -> bool {
         self.dimensions() == other.dimensions() && self.buffer_flat() == other.buffer_flat()
     }
@@ -97,8 +97,8 @@ impl<TP: PixelType> ImageChannel<TP> {
     }
 }
 
-impl<'a, TP: PixelType> GenericImageChannel<'a, TP> {
-    /// Borrows `input` without copying. Mutable access (e.g. [`GenericImageChannel::make_mut`])
+impl<'a, TP: PixelType> ImageChannelView<'a, TP> {
+    /// Borrows `input` without copying. Mutable access (e.g. [`ImageChannelView::make_mut`])
     /// copies the buffer, `input` stays unchanged.
     ///
     /// # Panics
@@ -123,7 +123,7 @@ impl<'a, TP: PixelType> GenericImageChannel<'a, TP> {
         unsafe { Self::from_dynamic_unchecked(channel) }
     }
 
-    /// Mutably borrows `input` without copying. Mutable access (e.g. [`GenericImageChannel::make_mut`])
+    /// Mutably borrows `input` without copying. Mutable access (e.g. [`ImageChannelView::make_mut`])
     /// writes into `input`. Clones copy the buffer.
     ///
     /// # Panics
@@ -149,22 +149,20 @@ impl<'a, TP: PixelType> GenericImageChannel<'a, TP> {
         unsafe { Self::from_dynamic_unchecked(channel) }
     }
 
-    /// Borrows the channel without copying the buffer, like [`GenericImageChannel::new_slice`].
+    /// Borrows the channel without copying the buffer, like [`ImageChannelView::new_slice`].
     #[must_use]
-    pub fn view(&self) -> GenericImageChannel<'_, TP> {
-        GenericImageChannel::new_slice(self.buffer(), self.width(), self.height())
+    pub fn view(&self) -> ImageChannelView<'_, TP> {
+        ImageChannelView::new_slice(self.buffer(), self.width(), self.height())
     }
 
     /// Mutably borrows the channel without copying the buffer.
     ///
-    /// Mutable access to the view calls [`GenericImageChannel::make_mut`] on this channel and
+    /// Mutable access to the view calls [`ImageChannelView::make_mut`] on this channel and
     /// writes into its buffer. Clones of the view copy the buffer.
     #[must_use]
-    pub fn view_mut(&mut self) -> GenericImageChannel<'_, TP> {
+    pub fn view_mut(&mut self) -> ImageChannelView<'_, TP> {
         let (width, height) = self.dimensions();
-        let ptr = GenericDynamicImageChannel::get_unsafe(&self.0)
-            .ptr
-            .cast_mut();
+        let ptr = DynamicImageChannelView::get_unsafe(&self.0).ptr.cast_mut();
         let original = ptr::from_mut(&mut self.0);
         // Safety: The channel is exclusively borrowed. The vtable calls its make_mut before writing
         let channel = unsafe {
@@ -177,16 +175,16 @@ impl<'a, TP: PixelType> GenericImageChannel<'a, TP> {
             )
         };
         // Safety: The vtable is built for TP::Primitive with TP::ELEMENTS
-        unsafe { GenericImageChannel::from_dynamic_unchecked(channel) }
+        unsafe { ImageChannelView::from_dynamic_unchecked(channel) }
     }
 
     /// Don't use this method unless you need a custom storage.
     ///
     /// Use/provide methods like `new_vec()` and `new_arc()` for safe construction.
-    /// Untyped storages can be created with [`GenericDynamicImageChannel::from_unsafe`] instead.
+    /// Untyped storages can be created with [`DynamicImageChannelView::from_unsafe`] instead.
     ///
     /// # Safety
-    /// The fields must fulfill the invariants of [`GenericDynamicImageChannel::from_unsafe`]
+    /// The fields must fulfill the invariants of [`DynamicImageChannelView::from_unsafe`]
     /// (e.g. the buffer is valid for `'a`), except that the buffer only has to be valid for
     /// `TP::Primitive` instead of any `Pod` type. Furthermore, `ptr` must be aligned for
     /// `TP::Primitive` and `vtable.primitive_size()` must return `size_of::<TP::Primitive>()`.
@@ -205,7 +203,7 @@ impl<'a, TP: PixelType> GenericImageChannel<'a, TP> {
             vtable,
             data,
         );
-        let channel = unsafe { GenericDynamicImageChannel::from_unsafe(unsafe_ch) };
+        let channel = unsafe { DynamicImageChannelView::from_unsafe(unsafe_ch) };
         // Safety: Forwarded to the caller
         unsafe { Self::from_dynamic_unchecked(channel) }
     }
@@ -213,7 +211,7 @@ impl<'a, TP: PixelType> GenericImageChannel<'a, TP> {
     /// # Safety
     /// `channel` must contain a valid buffer of `TP::Primitive` with `TP::ELEMENTS` per pixel
     pub(crate) const unsafe fn from_dynamic_unchecked(
-        channel: GenericDynamicImageChannel<'a>,
+        channel: DynamicImageChannelView<'a>,
     ) -> Self {
         Self(channel, PhantomData)
     }
@@ -284,8 +282,8 @@ impl<'a, TP: PixelType> GenericImageChannel<'a, TP> {
 
     #[must_use]
     pub fn into_vec_flat(self) -> Vec<TP::Primitive> {
-        let raw = GenericDynamicImageChannel::get_unsafe(&self.0);
-        let vec_drop: unsafe extern "C-unwind" fn(&mut GenericDynamicImageChannel<'_>) =
+        let raw = DynamicImageChannelView::get_unsafe(&self.0);
+        let vec_drop: unsafe extern "C-unwind" fn(&mut DynamicImageChannelView<'_>) =
             crate::vec::drop_vec_channel::<TP::Primitive>;
         // Check if this is a Vec-backed channel
         if ptr::fn_addr_eq(raw.vtable.drop, vec_drop) {
@@ -334,13 +332,13 @@ impl<'a, TP: PixelType> GenericImageChannel<'a, TP> {
     }
 }
 
-impl<'a, TP: PixelType> TryFrom<GenericDynamicImageChannel<'a>> for GenericImageChannel<'a, TP>
+impl<'a, TP: PixelType> TryFrom<DynamicImageChannelView<'a>> for ImageChannelView<'a, TP>
 where
     TP::Primitive: Pod,
 {
-    type Error = GenericDynamicImageChannel<'a>;
+    type Error = DynamicImageChannelView<'a>;
 
-    fn try_from(value: GenericDynamicImageChannel<'a>) -> Result<Self, Self::Error> {
+    fn try_from(value: DynamicImageChannelView<'a>) -> Result<Self, Self::Error> {
         if value.fits_pixel::<TP>() {
             // Safety: Size, alignment and pixel_elements are checked. Pod accepts any bit pattern
             Ok(unsafe { Self::from_dynamic_unchecked(value) })
@@ -350,41 +348,41 @@ where
     }
 }
 
-impl<'a, 'b, TP: PixelType> TryFrom<&'b GenericDynamicImageChannel<'a>>
-    for &'b GenericImageChannel<'a, TP>
+impl<'a, 'b, TP: PixelType> TryFrom<&'b DynamicImageChannelView<'a>>
+    for &'b ImageChannelView<'a, TP>
 where
     TP::Primitive: Pod,
 {
     type Error = ();
 
-    fn try_from(value: &'b GenericDynamicImageChannel<'a>) -> Result<Self, Self::Error> {
+    fn try_from(value: &'b DynamicImageChannelView<'a>) -> Result<Self, Self::Error> {
         value.try_cast().ok_or(())
     }
 }
 
-impl<'a, 'b, TP: PixelType> TryFrom<&'b mut GenericDynamicImageChannel<'a>>
-    for &'b mut GenericImageChannel<'a, TP>
+impl<'a, 'b, TP: PixelType> TryFrom<&'b mut DynamicImageChannelView<'a>>
+    for &'b mut ImageChannelView<'a, TP>
 where
     TP::Primitive: Pod,
 {
     type Error = ();
 
-    fn try_from(value: &'b mut GenericDynamicImageChannel<'a>) -> Result<Self, Self::Error> {
+    fn try_from(value: &'b mut DynamicImageChannelView<'a>) -> Result<Self, Self::Error> {
         value.try_cast_mut().ok_or(())
     }
 }
 
-/// Requires `Pod`, because a `GenericDynamicImageChannel` can be viewed as any `Pod` primitive of the same size
-impl<'a, TP: PixelType> From<GenericImageChannel<'a, TP>> for GenericDynamicImageChannel<'a>
+/// Requires `Pod`, because a `DynamicImageChannelView` can be viewed as any `Pod` primitive of the same size
+impl<'a, TP: PixelType> From<ImageChannelView<'a, TP>> for DynamicImageChannelView<'a>
 where
     TP::Primitive: Pod,
 {
-    fn from(value: GenericImageChannel<'a, TP>) -> Self {
+    fn from(value: ImageChannelView<'a, TP>) -> Self {
         value.0
     }
 }
 
-impl<TP: PixelType> Debug for GenericImageChannel<'_, TP> {
+impl<TP: PixelType> Debug for ImageChannelView<'_, TP> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("ImageChannel")
             .field("width", &self.width())
@@ -395,14 +393,14 @@ impl<TP: PixelType> Debug for GenericImageChannel<'_, TP> {
     }
 }
 
-/// `VTable` for [`GenericDynamicImageChannel`] and [`GenericImageChannel`]
+/// `VTable` for [`DynamicImageChannelView`] and [`ImageChannelView`]
 ///
 /// The vtable itself is untyped, but its functions are usually generic over the primitive of the
 /// buffer. All functions use the "C-unwind" ABI, so panics propagate instead of aborting.
 ///
-/// The functions receive a [`GenericDynamicImageChannel`], whose raw parts are accessible via
-/// [`GenericDynamicImageChannel::get_unsafe`] and [`GenericDynamicImageChannel::get_unsafe_mut`].
-/// For channels of non-`Pod` primitives (only reachable through [`GenericImageChannel`]), the
+/// The functions receive a [`DynamicImageChannelView`], whose raw parts are accessible via
+/// [`DynamicImageChannelView::get_unsafe`] and [`DynamicImageChannelView::get_unsafe_mut`].
+/// For channels of non-`Pod` primitives (only reachable through [`ImageChannelView`]), the
 /// buffer is only valid for the primitive the vtable was built for.
 ///
 /// The functions have to work with channels of any lifetime `'a`, as owned channels can be
@@ -412,23 +410,23 @@ pub struct ImageChannelVTable {
     /// Returns a channel with the same dimensions, `pixel_elements` and content, which can be used
     /// independently. The buffer can be shared until `make_mut` is called.
     pub clone: for<'a> unsafe extern "C-unwind" fn(
-        &GenericDynamicImageChannel<'a>,
-    ) -> GenericDynamicImageChannel<'a>,
+        &DynamicImageChannelView<'a>,
+    ) -> DynamicImageChannelView<'a>,
     /// Ensures that the buffer is exclusively owned by the channel, so it can be mutated.
-    /// The entire channel can be replaced (assigning a `GenericDynamicImageChannel` drops the old one).
+    /// The entire channel can be replaced (assigning a `DynamicImageChannelView` drops the old one).
     /// The new buffer has to be aligned for the primitive.
-    pub make_mut: unsafe extern "C-unwind" fn(&mut GenericDynamicImageChannel<'_>),
+    pub make_mut: unsafe extern "C-unwind" fn(&mut DynamicImageChannelView<'_>),
     /// Releases the buffer and `data`. The channel is not used afterwards.
-    pub drop: unsafe extern "C-unwind" fn(&mut GenericDynamicImageChannel<'_>),
+    pub drop: unsafe extern "C-unwind" fn(&mut DynamicImageChannelView<'_>),
     /// Size of the primitive in bytes. It has to return the same value on every call.
     pub primitive_size: extern "C-unwind" fn() -> NonZeroUsize,
 }
 
 /// Raw parts of a channel. This is only relevant when implementing a custom storage.
 ///
-/// In contrast to [`GenericDynamicImageChannel`], `UnsafeImageChannel` has no guarantee about the
+/// In contrast to [`DynamicImageChannelView`], `UnsafeImageChannel` has no guarantee about the
 /// consistency of its fields. It doesn't implement `Drop`, so dropping it leaks the buffer.
-/// Use [`GenericDynamicImageChannel::from_unsafe`] to take ownership of it.
+/// Use [`DynamicImageChannelView::from_unsafe`] to take ownership of it.
 #[repr(C)]
 #[must_use = "Dropping an UnsafeImageChannel leaks its buffer"]
 pub struct UnsafeImageChannel {
@@ -494,7 +492,7 @@ pub(crate) extern "C-unwind" fn primitive_size<T>() -> NonZeroUsize {
     const { NonZeroUsize::new(size_of::<T>()).expect("Zero sized primitives are not supported") }
 }
 
-// Workaround inability to have static which uses Outer Generics
+// Workaround inability to have static which uses outer Generics
 pub(crate) trait ChannelFactory<T> {
     const VTABLE: &'static ImageChannelVTable;
 }
@@ -689,7 +687,7 @@ mod tests {
         ));
     }
 
-    fn test_entire_vtable<TP: PixelType>(mut image: GenericImageChannel<'_, TP>)
+    fn test_entire_vtable<TP: PixelType>(mut image: ImageChannelView<'_, TP>)
     where
         TP::Primitive: Default + Eq + Debug,
     {
@@ -711,7 +709,7 @@ mod tests {
     fn miri_slice_channel_shares_buffer_until_make_mut() {
         let data = [1u16, 2];
         let mut channel =
-            GenericImageChannel::new_slice(&data, NonZeroU32::new(2).unwrap(), NonZeroU32::MIN);
+            ImageChannelView::new_slice(&data, NonZeroU32::new(2).unwrap(), NonZeroU32::MIN);
         let clone = channel.clone();
         assert_eq!(clone.buffer().as_ptr(), data.as_ptr(), "Clones share");
 
@@ -725,12 +723,12 @@ mod tests {
 
     #[test]
     fn miri_test_slice_channel_vtable() {
-        test_entire_vtable(GenericImageChannel::new_slice(
+        test_entire_vtable(ImageChannelView::new_slice(
             &[[1u16, 2]],
             NonZeroU32::MIN,
             NonZeroU32::MIN,
         ));
-        test_entire_vtable(GenericImageChannel::new_slice_mut(
+        test_entire_vtable(ImageChannelView::new_slice_mut(
             &mut [[1u16, 2]],
             NonZeroU32::MIN,
             NonZeroU32::MIN,
@@ -755,8 +753,7 @@ mod tests {
     fn miri_view_mut_of_shared_vec_channel() {
         let mut image = Image::<u8, 2>::new_vec(vec![1, 2], NonZeroU32::MIN, NonZeroU32::MIN);
         let clone = image.clone();
-        let [_, second] = image.view_mut().into_channels();
-        let mut second = second;
+        let [_, mut second] = image.view_mut().into_channels();
         second.make_mut()[0] = 3;
         drop(second);
         assert_eq!(image.buffers(), [[1], [3]]);
@@ -766,14 +763,14 @@ mod tests {
     #[test]
     fn view_into_dynamic_channel_and_back() {
         let mut data = [1u8, 2];
-        let view = GenericImageChannel::new_slice_mut(
+        let view = ImageChannelView::new_slice_mut(
             &mut data,
             NonZeroU32::new(2).unwrap(),
             NonZeroU32::MIN,
         );
-        let mut dynamic = GenericDynamicImageChannel::from(view);
+        let mut dynamic = DynamicImageChannelView::from(view);
         dynamic.primitive_make_mut::<u8>().unwrap()[1] = 3;
-        let typed = GenericImageChannel::<u8>::try_from(dynamic).unwrap();
+        let typed = ImageChannelView::<u8>::try_from(dynamic).unwrap();
         assert_eq!(typed.buffer(), &[1, 3]);
         drop(typed);
         assert_eq!(data, [1, 3]);

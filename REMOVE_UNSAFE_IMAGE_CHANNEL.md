@@ -4,7 +4,7 @@ Remove UnsafeImageChannel │
 │ │
 │ UnsafeImageChannel only exists as a bag of raw fields that is (a) assembled and handed to │
 │ from_unsafe, (b) read in vtables via get_unsafe, and (c) mutated in two make_mut │
-│ implementations via get_unsafe_mut. Since vtables receive a GenericDynamicImageChannel │
+│ implementations via get_unsafe_mut. Since vtables receive a DynamicImageChannelView │
 │ that has to be valid again when the function returns, a separate "maybe invalid" type adds API │
 │ surface without enabling anything. Both get_unsafe_mut uses (arc make_mut, view │
 │ make_original_mut) can instead assign a fully constructed channel (*image = ...), which │
@@ -13,15 +13,15 @@ Remove UnsafeImageChannel │
 │ │
 │ Design │
 │ │
-│ - GenericDynamicImageChannel<'a> becomes #[repr(C)] with the fields inlined in the same order │
+│ - DynamicImageChannelView<'a> becomes #[repr(C)] with the fields inlined in the same order │
 │ as today (ptr, width, height, vtable, data, pixel_elements) plus a trailing │
-│ PhantomData<&'a ()> → FFI layout unchanged. GenericImageChannel stays │
+│ PhantomData<&'a ()> → FFI layout unchanged. ImageChannelView stays │
 │ repr(transparent) over it. │
 │ - Replace UnsafeImageChannel::new_with_vtable + from_unsafe with │
 │ pub const unsafe fn from_raw_parts(ptr: *const u8, width, height, pixel_elements, vtable: &'static ImageChannelVTable, data: *mut ()) -> Self │
 │ (safety doc = current from_unsafe invariants, incl. validity for 'a). │
 │ - Replace get_unsafe with safe associated fns (not methods): │
-│ GenericDynamicImageChannel::raw_ptr(ch) -> *const u8, raw_data(ch) -> *mut (), │
+│ DynamicImageChannelView::raw_ptr(ch) -> *const u8, raw_data(ch) -> *mut (), │
 │ raw_vtable(ch) -> &'static ImageChannelVTable. │
 │ - Remove get_unsafe_mut. Mutation in make_mut = assign a new channel: │
 │ - imbuf/src/arc.rs make_mut: *image = DynamicImageChannel::from_arc(new_data, w, h, pe) │
@@ -32,7 +32,7 @@ Remove UnsafeImageChannel │
 │ - Move calc_len_packed/flat helpers into usage of existing len()/len_flat() │
 │ (vec.rs drop_vec_channel uses image.len_flat()). │
 │ - Update ImageChannelVTable doc (references to get_unsafe/get_unsafe_mut) and │
-│ GenericImageChannel::new_with_vtable docs/impl to call from_raw_parts. │
+│ ImageChannelView::new_with_vtable docs/impl to call from_raw_parts. │
 │ │
 │ Files │
 │ │

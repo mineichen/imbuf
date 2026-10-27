@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::{
-    DynamicImageChannel, GenericDynamicImageChannel, ImageChannel, PixelType, PixelTypePrimitive,
+    DynamicImageChannel, DynamicImageChannelView, ImageChannel, PixelType, PixelTypePrimitive,
     channel::{
         ChannelFactory, ImageChannelVTable, UnsafeImageChannel, calc_pixel_len_flat, primitive_size,
     },
@@ -63,19 +63,19 @@ impl<T, const CHANNELS: usize> Clone for SharedVecMetadata<T, CHANNELS> {
 
 /// Borrows the metadata of a channel created by `create_shared_channels`
 unsafe fn metadata<'b, T, const CHANNELS: usize>(
-    image: &'b GenericDynamicImageChannel<'_>,
+    image: &'b DynamicImageChannelView<'_>,
 ) -> &'b SharedVecMetadata<T, CHANNELS> {
-    let data = GenericDynamicImageChannel::get_unsafe(image).data;
+    let data = DynamicImageChannelView::get_unsafe(image).data;
     unsafe { &*(data.cast::<SharedVecMetadata<T, CHANNELS>>()) }
 }
 
 // Single generic extern "C-unwind" functions with const CHANNELS
 // These are instantiated when added to the vtable
 unsafe extern "C-unwind" fn clone_shared_vec<'a, T: 'static, const CHANNELS: usize>(
-    image: &GenericDynamicImageChannel<'a>,
-) -> GenericDynamicImageChannel<'a> {
+    image: &DynamicImageChannelView<'a>,
+) -> DynamicImageChannelView<'a> {
     let metadata = unsafe { metadata::<T, CHANNELS>(image) };
-    let raw = GenericDynamicImageChannel::get_unsafe(image);
+    let raw = DynamicImageChannelView::get_unsafe(image);
     let unsafe_ch = UnsafeImageChannel::new_with_vtable(
         raw.ptr,
         raw.width,
@@ -89,7 +89,7 @@ unsafe extern "C-unwind" fn clone_shared_vec<'a, T: 'static, const CHANNELS: usi
 }
 
 unsafe extern "C-unwind" fn make_mut_shared_vec<T: PixelTypePrimitive, const CHANNELS: usize>(
-    image: &mut GenericDynamicImageChannel<'_>,
+    image: &mut DynamicImageChannelView<'_>,
 ) {
     let metadata = unsafe { metadata::<T, CHANNELS>(image) };
     let is_unique =
@@ -109,9 +109,9 @@ unsafe extern "C-unwind" fn make_mut_shared_vec<T: PixelTypePrimitive, const CHA
 }
 
 pub(crate) unsafe extern "C-unwind" fn drop_shared_vec<T: 'static, const CHANNELS: usize>(
-    image: &mut GenericDynamicImageChannel<'_>,
+    image: &mut DynamicImageChannelView<'_>,
 ) {
-    let data = GenericDynamicImageChannel::get_unsafe(image).data;
+    let data = DynamicImageChannelView::get_unsafe(image).data;
     unsafe {
         let metadata = Box::from_raw(data.cast::<SharedVecMetadata<T, CHANNELS>>());
         let shared = metadata.data_ptr;

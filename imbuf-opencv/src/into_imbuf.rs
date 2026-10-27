@@ -7,7 +7,7 @@ use std::{
 
 use bytemuck::Pod;
 use imbuf::{
-    DynamicImage, DynamicImageChannel, GenericDynamicImageChannel, Image, ImageChannelVTable,
+    DynamicImage, DynamicImageChannel, DynamicImageChannelView, Image, ImageChannelVTable,
     PixelType, PixelTypePrimitive, UnsafeImageChannel,
 };
 use opencv::{
@@ -146,8 +146,8 @@ fn mat_buffer_is_exclusive(mat: &Mat) -> bool {
 }
 
 /// Reborrows the `cv::Mat` owned by the channel without taking ownership.
-unsafe fn mat_view(image: &GenericDynamicImageChannel<'_>) -> ManuallyDrop<Mat> {
-    let data = GenericDynamicImageChannel::get_unsafe(image).data;
+unsafe fn mat_view(image: &DynamicImageChannelView<'_>) -> ManuallyDrop<Mat> {
+    let data = DynamicImageChannelView::get_unsafe(image).data;
     ManuallyDrop::new(unsafe { Mat::from_raw(data.cast()) })
 }
 
@@ -201,8 +201,8 @@ extern "C-unwind" fn primitive_size<P>() -> NonZeroUsize {
 }
 
 unsafe extern "C-unwind" fn clone_mat_channel<'a, P: PixelTypePrimitive + Pod>(
-    image: &GenericDynamicImageChannel<'a>,
-) -> GenericDynamicImageChannel<'a> {
+    image: &DynamicImageChannelView<'a>,
+) -> DynamicImageChannelView<'a> {
     let mat = unsafe { mat_view(image) };
     match Mat::copy(&*mat).and_then(OpenCVIntoExternContainer::opencv_into_extern_container) {
         Ok(cloned) => unsafe {
@@ -211,7 +211,7 @@ unsafe extern "C-unwind" fn clone_mat_channel<'a, P: PixelTypePrimitive + Pod>(
                 image.width(),
                 image.height(),
                 image.pixel_elements(),
-                GenericDynamicImageChannel::get_unsafe(image).vtable,
+                DynamicImageChannelView::get_unsafe(image).vtable,
                 cloned.into_raw().cast::<()>(),
             ))
         },
@@ -223,7 +223,7 @@ unsafe extern "C-unwind" fn clone_mat_channel<'a, P: PixelTypePrimitive + Pod>(
 }
 
 unsafe extern "C-unwind" fn make_mat_channel_mut<P: PixelTypePrimitive + Pod>(
-    image: &mut GenericDynamicImageChannel<'_>,
+    image: &mut DynamicImageChannelView<'_>,
 ) {
     let mat = unsafe { mat_view(image) };
     if mat_buffer_is_exclusive(&mat) {
@@ -239,7 +239,7 @@ unsafe extern "C-unwind" fn make_mat_channel_mut<P: PixelTypePrimitive + Pod>(
                 image.width(),
                 image.height(),
                 image.pixel_elements(),
-                GenericDynamicImageChannel::get_unsafe(image).vtable,
+                DynamicImageChannelView::get_unsafe(image).vtable,
                 owned.into_raw().cast(),
             ))
         },
@@ -250,12 +250,12 @@ unsafe extern "C-unwind" fn make_mat_channel_mut<P: PixelTypePrimitive + Pod>(
     };
 }
 
-unsafe extern "C-unwind" fn drop_mat_channel(image: &mut GenericDynamicImageChannel<'_>) {
+unsafe extern "C-unwind" fn drop_mat_channel(image: &mut DynamicImageChannelView<'_>) {
     drop(ManuallyDrop::into_inner(unsafe { mat_view(image) }));
 }
 
 fn copied_channel<P: PixelTypePrimitive + Pod>(
-    image: &GenericDynamicImageChannel<'_>,
+    image: &DynamicImageChannelView<'_>,
 ) -> DynamicImageChannel {
     // Safety: The vtable is built for P
     let data = unsafe { image.buffer_flat_unchecked::<P>() }.to_vec();

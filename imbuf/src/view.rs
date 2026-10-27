@@ -3,7 +3,7 @@
 use std::num::{NonZeroU8, NonZeroU32};
 
 use crate::{
-    DynamicImageChannel, GenericDynamicImageChannel, PixelTypePrimitive,
+    DynamicImageChannel, DynamicImageChannelView, PixelTypePrimitive,
     channel::{ChannelFactory, ImageChannelVTable, UnsafeImageChannel, primitive_size},
 };
 
@@ -13,7 +13,7 @@ struct SliceFactory;
 /// Exclusive borrow of a buffer. `clone` copies the buffer.
 ///
 /// `data` is either null (the buffer is exclusive) or points to the borrowed
-/// `GenericDynamicImageChannel`, whose `make_mut` is called before writing into its buffer.
+/// `DynamicImageChannelView`, whose `make_mut` is called before writing into its buffer.
 struct SliceMutFactory;
 
 /// # Safety
@@ -24,7 +24,7 @@ pub(crate) unsafe fn slice_channel<'a, T: PixelTypePrimitive>(
     width: NonZeroU32,
     height: NonZeroU32,
     pixel_elements: NonZeroU8,
-) -> GenericDynamicImageChannel<'a> {
+) -> DynamicImageChannelView<'a> {
     let raw = UnsafeImageChannel::new_with_vtable(
         ptr.cast(),
         width,
@@ -34,7 +34,7 @@ pub(crate) unsafe fn slice_channel<'a, T: PixelTypePrimitive>(
         std::ptr::null_mut(),
     );
     // Safety: Forwarded to the caller
-    unsafe { GenericDynamicImageChannel::from_unsafe(raw) }
+    unsafe { DynamicImageChannelView::from_unsafe(raw) }
 }
 
 /// # Safety
@@ -46,8 +46,8 @@ pub(crate) unsafe fn slice_mut_channel<'a, T: PixelTypePrimitive>(
     width: NonZeroU32,
     height: NonZeroU32,
     pixel_elements: NonZeroU8,
-    original: *mut GenericDynamicImageChannel<'_>,
-) -> GenericDynamicImageChannel<'a> {
+    original: *mut DynamicImageChannelView<'_>,
+) -> DynamicImageChannelView<'a> {
     let raw = UnsafeImageChannel::new_with_vtable(
         ptr.cast_const().cast(),
         width,
@@ -57,7 +57,7 @@ pub(crate) unsafe fn slice_mut_channel<'a, T: PixelTypePrimitive>(
         original.cast(),
     );
     // Safety: Forwarded to the caller
-    unsafe { GenericDynamicImageChannel::from_unsafe(raw) }
+    unsafe { DynamicImageChannelView::from_unsafe(raw) }
 }
 
 impl<T: PixelTypePrimitive> ChannelFactory<T> for SliceFactory {
@@ -80,9 +80,9 @@ impl<T: PixelTypePrimitive> ChannelFactory<T> for SliceMutFactory {
 
 /// Shares the borrowed buffer, which is valid for `'a`
 unsafe extern "C-unwind" fn clone_slice_channel<'a>(
-    image: &GenericDynamicImageChannel<'a>,
-) -> GenericDynamicImageChannel<'a> {
-    let raw = GenericDynamicImageChannel::get_unsafe(image);
+    image: &DynamicImageChannelView<'a>,
+) -> DynamicImageChannelView<'a> {
+    let raw = DynamicImageChannelView::get_unsafe(image);
     let raw = UnsafeImageChannel::new_with_vtable(
         raw.ptr,
         raw.width,
@@ -92,11 +92,11 @@ unsafe extern "C-unwind" fn clone_slice_channel<'a>(
         raw.data,
     );
     // Safety: The buffer is valid and immutable for 'a
-    unsafe { GenericDynamicImageChannel::from_unsafe(raw) }
+    unsafe { DynamicImageChannelView::from_unsafe(raw) }
 }
 
 unsafe extern "C-unwind" fn copy_into_vec<T: PixelTypePrimitive>(
-    image: &mut GenericDynamicImageChannel<'_>,
+    image: &mut DynamicImageChannelView<'_>,
 ) {
     // Safety: The vtable is built for T
     let copy = unsafe { image.buffer_flat_unchecked::<T>() }.to_vec();
@@ -104,18 +104,18 @@ unsafe extern "C-unwind" fn copy_into_vec<T: PixelTypePrimitive>(
         DynamicImageChannel::from_vec(copy, image.width(), image.height(), image.pixel_elements());
 }
 
-unsafe extern "C-unwind" fn make_original_mut(image: &mut GenericDynamicImageChannel<'_>) {
+unsafe extern "C-unwind" fn make_original_mut(image: &mut DynamicImageChannelView<'_>) {
     // Safety: The layout of the buffer doesn't change
-    let raw = unsafe { GenericDynamicImageChannel::get_unsafe_mut(image) };
-    let original = raw.data.cast::<GenericDynamicImageChannel<'_>>();
+    let raw = unsafe { DynamicImageChannelView::get_unsafe_mut(image) };
+    let original = raw.data.cast::<DynamicImageChannelView<'_>>();
     if !original.is_null() {
         // Safety: The original channel is exclusively borrowed by this channel
         let original = unsafe { &mut *original };
         original.make_exclusive();
-        raw.ptr = GenericDynamicImageChannel::get_unsafe(original).ptr;
+        raw.ptr = DynamicImageChannelView::get_unsafe(original).ptr;
     }
 }
 
-unsafe extern "C-unwind" fn noop_drop(_image: &mut GenericDynamicImageChannel<'_>) {
+unsafe extern "C-unwind" fn noop_drop(_image: &mut DynamicImageChannelView<'_>) {
     // The buffer is borrowed
 }

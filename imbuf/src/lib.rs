@@ -12,12 +12,12 @@ mod shared_vec;
 mod vec;
 mod view;
 
-pub use channel::{GenericImageChannel, ImageChannel, ImageChannelVTable, UnsafeImageChannel};
+pub use channel::{ImageChannel, ImageChannelVTable, ImageChannelView, UnsafeImageChannel};
 pub use dynamic::{
-    DynamicImage, DynamicImageChannel, GenericDynamicImage, GenericDynamicImageChannel,
+    DynamicImage, DynamicImageChannel, DynamicImageChannelView, DynamicImageView,
     IncompatibleImageError,
 };
-pub use image::{GenericImage, Image, ImageRef};
+pub use image::{Image, ImageView};
 pub use pixel::{PixelType, PixelTypePrimitive};
 
 const fn unwrap_usize_to_nonzero_u8(value: usize) -> NonZeroU8 {
