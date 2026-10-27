@@ -5,9 +5,7 @@ use std::{
 
 use crate::{
     DynamicImageChannel, DynamicImageChannelView, PixelTypePrimitive,
-    channel::{
-        ChannelFactory, ImageChannelVTable, UnsafeImageChannel, calc_pixel_len_flat, primitive_size,
-    },
+    channel::{ChannelFactory, ImageChannelVTable, calc_pixel_len_flat, primitive_size},
 };
 
 struct VecFactory;
@@ -33,15 +31,18 @@ impl DynamicImageChannel {
         let cap = input.capacity();
         let ptr = input.as_mut_ptr();
 
-        let unsafe_ch = UnsafeImageChannel::new_with_vtable(
-            ptr.cast(),
-            width,
-            height,
-            pixel_elements,
-            <VecFactory as ChannelFactory<T>>::VTABLE,
-            std::ptr::without_provenance_mut(cap),
-        );
-        unsafe { DynamicImageChannel::from_unsafe(unsafe_ch) }
+        // Safety: The buffer of the Vec stays valid until the vtable drops it and the vtable is
+        // built for `T`
+        unsafe {
+            DynamicImageChannel::from_raw_parts(
+                ptr.cast(),
+                width,
+                height,
+                pixel_elements,
+                <VecFactory as ChannelFactory<T>>::VTABLE,
+                std::ptr::without_provenance_mut(cap),
+            )
+        }
     }
 }
 
@@ -61,14 +62,9 @@ unsafe extern "C-unwind" fn make_mut(_image: &mut DynamicImageChannelView<'_>) {
 pub(crate) unsafe extern "C-unwind" fn drop_vec_channel<T>(
     image: &mut DynamicImageChannelView<'_>,
 ) {
-    let raw = DynamicImageChannelView::get_unsafe(image);
-    drop(unsafe {
-        Vec::from_raw_parts(
-            raw.ptr.cast::<T>().cast_mut(),
-            raw.calc_len_flat(),
-            raw.data as usize,
-        )
-    });
+    let ptr = DynamicImageChannelView::raw_ptr(image);
+    let capacity = DynamicImageChannelView::raw_data(image) as usize;
+    drop(unsafe { Vec::from_raw_parts(ptr.cast::<T>().cast_mut(), image.len_flat(), capacity) });
 }
 
 #[cfg(test)]

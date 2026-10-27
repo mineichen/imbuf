@@ -6,7 +6,7 @@
   - Remove `ImageRef`, `ImageMut` and `BorrowableImageChannel` with ImageView. `TryFrom<&mut DynamicImageView> for ImageView` and `ImageView::view_mut` create borrowed images, which write into the borrowed buffers.
   - Add `ImageChannelView::new_slice`/`new_slice_mut`, `ImageChannelView::view`/`view_mut` and the same methods on `ImageView`. Shared borrows copy the buffer on mutable access, exclusive borrows write into the borrowed buffer and copy it on `clone`.
   - The functions of `ImageChannelVTable` receive a `DynamicImageChannelView<'a>` and have to be generic over `'a` (e.g. `unsafe extern "C-unwind" fn clone<'a>(&DynamicImageChannelView<'a>) -> DynamicImageChannelView<'a>`).
-  - `DynamicImageChannelView::from_unsafe` and `ImageChannelView::new_with_vtable` create channels of any lifetime, whose buffer has to stay valid for `'a`.
+  - `DynamicImageChannelView::from_raw_parts` and `ImageChannelView::new_with_vtable` create channels of any lifetime, whose buffer has to stay valid for `'a`.
 - Breaking: change `from_flat_interleaved` to work with two params width and height instead of a tuple of the two
 - Breaking: `DynamicImageChannel` is a struct instead of an enum (`U8`, `U16`, `F32`). It only knows the size of its primitive (`DynamicImageChannel::primitive_size`), so its buffer can be viewed as any `bytemuck::Pod` primitive with the same size and alignment.
     - `DynamicImageChannel::buffer_flat::<T>` and `DynamicImageChannel::make_mut_flat::<T>` return `None` if the size or alignment of `T` doesn't match.
@@ -19,12 +19,10 @@
 - Breaking: Conversions between `ImageChannel<TP>`/`Image<TP, N>` and `DynamicImageChannel`/`DynamicImage` require `TP::Primitive: bytemuck::Pod`.
 - Breaking: `PixelTypePrimitive` is no longer sealed and has no methods, so custom primitives can be used. Primitives which are not `Pod` (e.g. a wrapper around `NonZeroU8`) work with `Image` and `ImageChannel`, but can't be converted into a `DynamicImage`. Zero sized primitives are rejected at compile time.
 - Breaking: `PixelType` is sealed (primitives and arrays of primitives) and contains `Primitive` directly.
-- Breaking: `UnsafeImageChannel` and `ImageChannelVTable` aren't generic anymore (`ptr: *const u8`).
+- Breaking: `ImageChannelVTable` isn't generic anymore (`ptr: *const u8`).
   - The vtable functions receive a `DynamicImageChannel` and use the `"C-unwind"` ABI, so panics propagate instead of aborting.
   - Add `ImageChannelVTable::primitive_size`.
-- Breaking: `UnsafeImageChannel` doesn't implement `Drop` anymore (dropping it leaks), `DynamicImageChannel` drops the channel instead. Before, safe code could create an `UnsafeImageChannel` whose `Drop` called the vtable with arbitrary fields.
-  - Add `unsafe DynamicImageChannel::from_unsafe`, which documents the invariants of a channel.
-  - Add `DynamicImageChannel::get_unsafe` and `unsafe DynamicImageChannel::get_unsafe_mut` to access the raw parts, e.g. when implementing a vtable.
+- Breaking: Remove `UnsafeImageChannel`; add `unsafe DynamicImageChannelView::from_raw_parts`, which documents the invariants of a channel, and `raw_ptr`/`raw_data`/`raw_vtable` to access the raw parts, e.g. when implementing a vtable. `make_mut` implementations mutate a channel by assigning a new one (the old channel is dropped via its vtable).
   - Remove `UnsafeImageChannel::new_vec` and `UnsafeImageChannel::new_arc`. Use `DynamicImageChannel::new_vec` or `ImageChannel::new_vec`/`new_arc` instead.
 - Breaking: `ImageChannel::buffer`, `ImageChannel::buffer_flat` and `ImageChannel::buffer_flat_bytes` are no longer `const`. `ImageChannel::buffer_flat_bytes` requires `TP::Primitive: bytemuck::NoUninit`.
 - Breaking: Remove the deprecated `external` module and the `image_0_25` feature. Use the `imbuf-image` crate instead.

@@ -12,7 +12,7 @@ mod shared_vec;
 mod vec;
 mod view;
 
-pub use channel::{ImageChannel, ImageChannelVTable, ImageChannelView, UnsafeImageChannel};
+pub use channel::{ImageChannel, ImageChannelVTable, ImageChannelView};
 pub use dynamic::{
     DynamicImage, DynamicImageChannel, DynamicImageChannelView, DynamicImageView,
     IncompatibleImageError,

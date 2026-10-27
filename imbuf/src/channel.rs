@@ -162,12 +162,12 @@ impl<'a, TP: PixelType> ImageChannelView<'a, TP> {
     #[must_use]
     pub fn view_mut(&mut self) -> ImageChannelView<'_, TP> {
         let (width, height) = self.dimensions();
-        let ptr = DynamicImageChannelView::get_unsafe(&self.0).ptr.cast_mut();
+        let ptr = DynamicImageChannelView::raw_ptr(&self.0);
         let original = ptr::from_mut(&mut self.0);
         // Safety: The channel is exclusively borrowed. The vtable calls its make_mut before writing
         let channel = unsafe {
             crate::view::slice_mut_channel::<TP::Primitive>(
-                ptr.cast(),
+                ptr.cast_mut().cast(),
                 width,
                 height,
                 TP::ELEMENTS,
@@ -181,10 +181,10 @@ impl<'a, TP: PixelType> ImageChannelView<'a, TP> {
     /// Don't use this method unless you need a custom storage.
     ///
     /// Use/provide methods like `new_vec()` and `new_arc()` for safe construction.
-    /// Untyped storages can be created with [`DynamicImageChannelView::from_unsafe`] instead.
+    /// Untyped storages can be created with [`DynamicImageChannelView::from_raw_parts`] instead.
     ///
     /// # Safety
-    /// The fields must fulfill the invariants of [`DynamicImageChannelView::from_unsafe`]
+    /// The fields must fulfill the invariants of [`DynamicImageChannelView::from_raw_parts`]
     /// (e.g. the buffer is valid for `'a`), except that the buffer only has to be valid for
     /// `TP::Primitive` instead of any `Pod` type. Furthermore, `ptr` must be aligned for
     /// `TP::Primitive` and `vtable.primitive_size()` must return `size_of::<TP::Primitive>()`.
@@ -195,15 +195,16 @@ impl<'a, TP: PixelType> ImageChannelView<'a, TP> {
         vtable: &'static ImageChannelVTable,
         data: *mut (),
     ) -> Self {
-        let unsafe_ch = UnsafeImageChannel::new_with_vtable(
-            ptr.cast(),
-            width,
-            height,
-            TP::ELEMENTS,
-            vtable,
-            data,
-        );
-        let channel = unsafe { DynamicImageChannelView::from_unsafe(unsafe_ch) };
+        let channel = unsafe {
+            DynamicImageChannelView::from_raw_parts(
+                ptr.cast(),
+                width,
+                height,
+                TP::ELEMENTS,
+                vtable,
+                data,
+            )
+        };
         // Safety: Forwarded to the caller
         unsafe { Self::from_dynamic_unchecked(channel) }
     }
@@ -282,13 +283,15 @@ impl<'a, TP: PixelType> ImageChannelView<'a, TP> {
 
     #[must_use]
     pub fn into_vec_flat(self) -> Vec<TP::Primitive> {
-        let raw = DynamicImageChannelView::get_unsafe(&self.0);
+        let vtable = DynamicImageChannelView::raw_vtable(&self.0);
         let vec_drop: unsafe extern "C-unwind" fn(&mut DynamicImageChannelView<'_>) =
             crate::vec::drop_vec_channel::<TP::Primitive>;
         // Check if this is a Vec-backed channel
-        if ptr::fn_addr_eq(raw.vtable.drop, vec_drop) {
-            let ptr = raw.ptr.cast::<TP::Primitive>().cast_mut();
-            let capacity = raw.data as usize;
+        if ptr::fn_addr_eq(vtable.drop, vec_drop) {
+            let ptr = DynamicImageChannelView::raw_ptr(&self.0)
+                .cast::<TP::Primitive>()
+                .cast_mut();
+            let capacity = DynamicImageChannelView::raw_data(&self.0) as usize;
             let len = self.len_flat();
             mem::forget(self);
             // Safety: The Vec-vtable stores the capacity of a Vec<TP::Primitive> in data
@@ -398,8 +401,11 @@ impl<TP: PixelType> Debug for ImageChannelView<'_, TP> {
 /// The vtable itself is untyped, but its functions are usually generic over the primitive of the
 /// buffer. All functions use the "C-unwind" ABI, so panics propagate instead of aborting.
 ///
-/// The functions receive a [`DynamicImageChannelView`], whose raw parts are accessible via
-/// [`DynamicImageChannelView::get_unsafe`] and [`DynamicImageChannelView::get_unsafe_mut`].
+/// The functions receive a [`DynamicImageChannelView`], whose raw parts are accessible through
+/// the safe associated functions [`DynamicImageChannelView::raw_ptr`],
+/// [`DynamicImageChannelView::raw_data`] and [`DynamicImageChannelView::raw_vtable`]. To mutate
+/// a channel, replace it entirely by assigning a new `DynamicImageChannelView` (the old channel
+/// is dropped via its vtable).
 /// For channels of non-`Pod` primitives (only reachable through [`ImageChannelView`]), the
 /// buffer is only valid for the primitive the vtable was built for.
 ///
@@ -422,55 +428,7 @@ pub struct ImageChannelVTable {
     pub primitive_size: extern "C-unwind" fn() -> NonZeroUsize,
 }
 
-/// Raw parts of a channel. This is only relevant when implementing a custom storage.
-///
-/// In contrast to [`DynamicImageChannelView`], `UnsafeImageChannel` has no guarantee about the
-/// consistency of its fields. It doesn't implement `Drop`, so dropping it leaks the buffer.
-/// Use [`DynamicImageChannelView::from_unsafe`] to take ownership of it.
-#[repr(C)]
-#[must_use = "Dropping an UnsafeImageChannel leaks its buffer"]
-pub struct UnsafeImageChannel {
-    pub ptr: *const u8,
-    pub width: NonZeroU32,
-    pub height: NonZeroU32,
-    pub vtable: &'static ImageChannelVTable,
-    /// Storage specific data, which has to be cleaned up by `vtable.drop`
-    pub data: *mut (),
-    pub pixel_elements: NonZeroU8,
-}
-
-impl UnsafeImageChannel {
-    /// Don't use this method unless you need a custom storage.
-    ///
-    /// Use/provide methods like `new_vec()` and `new_arc()` for safe construction
-    pub const fn new_with_vtable(
-        ptr: *const u8,
-        width: NonZeroU32,
-        height: NonZeroU32,
-        pixel_elements: NonZeroU8,
-        vtable: &'static ImageChannelVTable,
-        data: *mut (),
-    ) -> Self {
-        UnsafeImageChannel {
-            ptr,
-            width,
-            height,
-            vtable,
-            data,
-            pixel_elements,
-        }
-    }
-
-    pub(crate) const fn calc_len_packed(&self) -> usize {
-        calc_pixel_len_packed(self.width, self.height)
-    }
-
-    pub(crate) const fn calc_len_flat(&self) -> usize {
-        calc_pixel_len_flat(self.width, self.height, self.pixel_elements)
-    }
-}
-
-const fn calc_pixel_len_packed(width: NonZeroU32, height: NonZeroU32) -> usize {
+pub(crate) const fn calc_pixel_len_packed(width: NonZeroU32, height: NonZeroU32) -> usize {
     #[allow(clippy::cast_possible_truncation)]
     let width_usize = width.get() as usize;
     #[allow(clippy::cast_possible_truncation)]

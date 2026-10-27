@@ -5,7 +5,7 @@ use std::{
 
 use imbuf::{
     DynamicImage, DynamicImageChannel, DynamicImageChannelView, Image, ImageChannel,
-    ImageChannelVTable, PixelTypePrimitive, UnsafeImageChannel,
+    ImageChannelVTable, PixelTypePrimitive,
 };
 
 const ONE: NonZeroU32 = NonZeroU32::MIN;
@@ -105,16 +105,17 @@ static STATIC_VTABLE: ImageChannelVTable = ImageChannelVTable {
 /// One `Rgba8` pixel, which starts at an address which is not aligned for `f32`
 fn misaligned_channel() -> DynamicImageChannel {
     let ptr = BYTES.0.as_ptr().wrapping_add(1);
-    let raw = UnsafeImageChannel::new_with_vtable(
-        ptr,
-        ONE,
-        ONE,
-        NonZeroU8::MIN,
-        &STATIC_VTABLE,
-        std::ptr::null_mut(),
-    );
     // Safety: The static buffer contains 4 bytes after ptr. Writes are rejected by make_mut
-    unsafe { DynamicImageChannel::from_unsafe(raw) }
+    unsafe {
+        DynamicImageChannel::from_raw_parts(
+            ptr,
+            ONE,
+            ONE,
+            NonZeroU8::MIN,
+            &STATIC_VTABLE,
+            std::ptr::null_mut(),
+        )
+    }
 }
 
 #[test]

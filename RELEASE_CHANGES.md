@@ -37,8 +37,8 @@ Pending changes for the upcoming releases of the unreleased `imbuf-image` /
   (`ImageView<'_, _, 1>`, `ImageChannelView<'_, _>`, `DynamicImageView<'_>`,
   `DynamicImageChannelView<'_>`, imbuf 0.4.0).
 - Construct the channels for imported `Mat`s with the public
-  `DynamicImageChannel::from_unsafe` (imbuf 0.4.0) instead of a `transmute` from
-  `UnsafeImageChannel`. Requires the `imbuf` dependency 0.4.0.
+  `DynamicImageChannelView::from_raw_parts` (imbuf 0.4.0) instead of a `transmute` from
+  raw parts. Requires the `imbuf` dependency 0.4.0.
 - Add `ImbufAsOpencv` / `ImbufAsOpencvMut` for `imbuf::DynamicImageChannel`.
   Its depth is derived from the primitive size (1 byte: `CV_8U`, 2 bytes:
   `CV_16U`, 4 bytes: `CV_32F`).

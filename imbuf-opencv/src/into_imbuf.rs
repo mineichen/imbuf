@@ -8,7 +8,7 @@ use std::{
 use bytemuck::Pod;
 use imbuf::{
     DynamicImage, DynamicImageChannel, DynamicImageChannelView, Image, ImageChannelVTable,
-    PixelType, PixelTypePrimitive, UnsafeImageChannel,
+    PixelType, PixelTypePrimitive,
 };
 use opencv::{
     core::{
@@ -147,7 +147,7 @@ fn mat_buffer_is_exclusive(mat: &Mat) -> bool {
 
 /// Reborrows the `cv::Mat` owned by the channel without taking ownership.
 unsafe fn mat_view(image: &DynamicImageChannelView<'_>) -> ManuallyDrop<Mat> {
-    let data = DynamicImageChannelView::get_unsafe(image).data;
+    let data = DynamicImageChannelView::raw_data(image);
     ManuallyDrop::new(unsafe { Mat::from_raw(data.cast()) })
 }
 
@@ -170,16 +170,11 @@ unsafe fn into_channel<P: PixelTypePrimitive + Pod>(
 ) -> DynamicImageChannel {
     let ptr = mat.data();
     let data = mat.into_raw().cast::<()>();
-    let channel = UnsafeImageChannel::new_with_vtable(
-        ptr,
-        width,
-        height,
-        pixel_elements,
-        vtable::<P>(),
-        data,
-    );
-    // Safety: The Mat keeps the buffer alive until the vtable drops it
-    unsafe { DynamicImageChannel::from_unsafe(channel) }
+    // Safety: The Mat keeps the buffer alive until the vtable drops it and the vtable is built
+    // for `P`
+    unsafe {
+        DynamicImageChannel::from_raw_parts(ptr, width, height, pixel_elements, vtable::<P>(), data)
+    }
 }
 
 fn planar_channel<P: PixelTypePrimitive + Pod>(
@@ -206,14 +201,16 @@ unsafe extern "C-unwind" fn clone_mat_channel<'a, P: PixelTypePrimitive + Pod>(
     let mat = unsafe { mat_view(image) };
     match Mat::copy(&*mat).and_then(OpenCVIntoExternContainer::opencv_into_extern_container) {
         Ok(cloned) => unsafe {
-            DynamicImageChannel::from_unsafe(UnsafeImageChannel::new_with_vtable(
+            // Safety: The cloned Mat keeps the buffer alive until the vtable drops it and the
+            // vtable is built for `P`
+            DynamicImageChannel::from_raw_parts(
                 cloned.data(),
                 image.width(),
                 image.height(),
                 image.pixel_elements(),
-                DynamicImageChannelView::get_unsafe(image).vtable,
+                DynamicImageChannelView::raw_vtable(image),
                 cloned.into_raw().cast::<()>(),
-            ))
+            )
         },
         Err(error) => {
             log::warn!("Cloning channel as Vec copy, cannot share Mat buffer: {error}");
@@ -234,14 +231,16 @@ unsafe extern "C-unwind" fn make_mat_channel_mut<P: PixelTypePrimitive + Pod>(
     // Assigning drops the previous channel, which releases its Mat
     *image = match mat.try_clone() {
         Ok(owned) => unsafe {
-            DynamicImageChannel::from_unsafe(UnsafeImageChannel::new_with_vtable(
+            // Safety: The cloned Mat keeps the buffer alive until the vtable drops it and the
+            // vtable is built for `P`
+            DynamicImageChannel::from_raw_parts(
                 owned.data(),
                 image.width(),
                 image.height(),
                 image.pixel_elements(),
-                DynamicImageChannelView::get_unsafe(image).vtable,
+                DynamicImageChannelView::raw_vtable(image),
                 owned.into_raw().cast(),
-            ))
+            )
         },
         Err(error) => {
             log::warn!("Cloning channel as Vec copy, cannot clone Mat buffer: {error}");

@@ -11,7 +11,8 @@ use std::{
 use bytemuck::Pod;
 
 use crate::{
-    ImageChannelView, ImageView, PixelType, PixelTypePrimitive, channel::UnsafeImageChannel,
+    ImageChannelView, ImageView, PixelType, PixelTypePrimitive,
+    channel::{ImageChannelVTable, calc_pixel_len_flat, calc_pixel_len_packed},
 };
 
 /// Image with number of channels and their types and dimensions only known at runtime
@@ -157,9 +158,24 @@ impl std::ops::DerefMut for DynamicImageView<'_> {
 ///
 /// The buffer is valid for the lifetime `'a`. Channels which own their buffer are `'static`
 /// (see [`DynamicImageChannel`]). Borrowed channels can be created from borrowed typed channels
-/// (e.g. [`ImageChannelView::view`]) or with [`DynamicImageChannelView::from_unsafe`].
-#[repr(transparent)]
-pub struct DynamicImageChannelView<'a>(UnsafeImageChannel, PhantomData<&'a ()>);
+/// (e.g. [`ImageChannelView::view`]) or with [`DynamicImageChannelView::from_raw_parts`].
+///
+/// The raw parts are exposed as fields to `#[repr(C)]`, so a channel can be stored in and
+/// retrieved from FFI types opaquely. The lifetime `'a` has to be re-established when reading
+/// the fields back into a channel.
+#[repr(C)]
+pub struct DynamicImageChannelView<'a> {
+    /// Pointer to the buffer, which is `len_flat()` primitives of the size
+    /// `vtable.primitive_size()` long
+    ptr: *const u8,
+    width: NonZeroU32,
+    height: NonZeroU32,
+    vtable: &'static ImageChannelVTable,
+    /// Storage specific data, which has to be cleaned up by `vtable.drop`
+    data: *mut (),
+    pixel_elements: NonZeroU8,
+    lifetime: PhantomData<&'a ()>,
+}
 
 /// [`DynamicImageChannelView`] which owns its buffer (or shares it with other owners)
 pub type DynamicImageChannel = DynamicImageChannelView<'static>;
@@ -179,10 +195,10 @@ impl DynamicImageChannel {
 }
 
 impl<'a> DynamicImageChannelView<'a> {
-    /// Takes ownership of an [`UnsafeImageChannel`], e.g. to support a custom storage.
+    /// Creates a channel from its raw parts, e.g. to support a custom storage.
     ///
     /// # Safety
-    /// `channel` has to uphold the following invariants:
+    /// The following invariants have to hold:
     /// - The size of the buffer in bytes (`width * height * pixel_elements * vtable.primitive_size()`)
     ///   doesn't exceed `isize::MAX`.
     /// - `ptr` points to an initialized buffer of that size, which stays valid until `vtable.drop`
@@ -192,68 +208,93 @@ impl<'a> DynamicImageChannelView<'a> {
     ///   (e.g. the primitive of the vtable is `Pod` itself).
     /// - `ptr` and `data` can be sent to and shared between threads.
     #[must_use]
-    pub const unsafe fn from_unsafe(channel: UnsafeImageChannel) -> Self {
-        Self(channel, PhantomData)
+    pub unsafe fn from_raw_parts(
+        ptr: *const u8,
+        width: NonZeroU32,
+        height: NonZeroU32,
+        pixel_elements: NonZeroU8,
+        vtable: &'static ImageChannelVTable,
+        data: *mut (),
+    ) -> Self {
+        #[cfg(debug_assertions)]
+        let _asserted = usize::try_from(
+            u64::from(height.get())
+                .strict_mul(u64::from(width.get()).strict_mul(u64::from(pixel_elements.get()))),
+        )
+        .expect("Expected valid raw parts")
+        .strict_mul((vtable.primitive_size)().get());
+        Self {
+            ptr,
+            width,
+            height,
+            vtable,
+            data,
+            pixel_elements,
+            lifetime: PhantomData,
+        }
     }
 
-    /// Read access to the raw parts, e.g. to implement an [`ImageChannelVTable`](crate::ImageChannelVTable).
+    /// Read access to the buffer pointer, e.g. to support a custom storage or implement
+    /// [`ImageChannelVTable`](crate::ImageChannelVTable).
     #[must_use]
-    pub const fn get_unsafe(channel: &Self) -> &UnsafeImageChannel {
-        &channel.0
+    pub const fn raw_ptr(channel: &Self) -> *const u8 {
+        channel.ptr
     }
 
-    /// Write access to the raw parts, e.g. to implement [`ImageChannelVTable::make_mut`](crate::ImageChannelVTable::make_mut).
-    ///
-    /// # Safety
-    /// The invariants of [`DynamicImageChannel::from_unsafe`] have to hold when the borrow ends.
-    /// Assigning a new `UnsafeImageChannel` leaks the previous buffer, as it doesn't implement
-    /// `Drop`. Assign a `DynamicImageChannel` to the outer reference instead.
-    pub const unsafe fn get_unsafe_mut(channel: &mut Self) -> &mut UnsafeImageChannel {
-        &mut channel.0
+    /// Read access to the storage specific data, e.g. to support a custom storage.
+    #[must_use]
+    pub const fn raw_data(channel: &Self) -> *mut () {
+        channel.data
+    }
+
+    /// Read access to the vtable, e.g. to support a custom storage.
+    #[must_use]
+    pub const fn raw_vtable(channel: &Self) -> &'static ImageChannelVTable {
+        channel.vtable
     }
 
     #[must_use]
     pub const fn width(&self) -> NonZeroU32 {
-        self.0.width
+        self.width
     }
 
     #[must_use]
     pub const fn height(&self) -> NonZeroU32 {
-        self.0.height
+        self.height
     }
 
     #[must_use]
     pub const fn dimensions(&self) -> (NonZeroU32, NonZeroU32) {
-        (self.0.width, self.0.height)
+        (self.width, self.height)
     }
 
     #[must_use]
     pub const fn dimensions_zeroable(&self) -> (u32, u32) {
-        (self.0.width.get(), self.0.height.get())
+        (self.width.get(), self.height.get())
     }
 
     #[must_use]
     pub const fn pixel_elements(&self) -> NonZeroU8 {
-        self.0.pixel_elements
+        self.pixel_elements
     }
 
     /// Size of a single primitive in bytes
     #[must_use]
     pub fn primitive_size(&self) -> NonZeroUsize {
-        (self.0.vtable.primitive_size)()
+        (self.vtable.primitive_size)()
     }
 
     #[must_use]
     #[allow(clippy::len_without_is_empty)]
     pub const fn len(&self) -> usize {
-        self.0.calc_len_packed()
+        calc_pixel_len_packed(self.width, self.height)
     }
 
     /// Number of primitives in the buffer (`width * height * pixel_elements`)
     #[allow(clippy::len_without_is_empty)]
     #[must_use]
     pub const fn len_flat(&self) -> usize {
-        self.0.calc_len_flat()
+        calc_pixel_len_flat(self.width, self.height, self.pixel_elements)
     }
 
     /// Returns `None`, if the size or the alignment of `T` don't match the primitive of the channel
@@ -275,7 +316,7 @@ impl<'a> DynamicImageChannelView<'a> {
             std::any::type_name::<T>()
         );
         // Safety: Forwarded to the caller. The length is valid due to the invariants of the channel
-        unsafe { slice::from_raw_parts(self.0.ptr.cast::<T>(), self.len_flat()) }
+        unsafe { slice::from_raw_parts(self.ptr.cast::<T>(), self.len_flat()) }
     }
 
     /// Mutable access to the buffer, which is copied if it is shared (copy on write).
@@ -293,20 +334,20 @@ impl<'a> DynamicImageChannelView<'a> {
         // Safety: Size and alignment are checked after make_mut, which might reallocate
         debug_assert!(self.fits_primitive::<T>());
         // Safety: Forwarded to the caller
-        unsafe { slice::from_raw_parts_mut(self.0.ptr.cast::<T>().cast_mut(), self.len_flat()) }
+        unsafe { slice::from_raw_parts_mut(self.ptr.cast::<T>().cast_mut(), self.len_flat()) }
     }
 
     /// Calls `vtable.make_mut`, so the buffer is exclusively owned by the channel afterwards
     pub(crate) fn make_exclusive(&mut self) {
         // Safety: The vtable is able to work with the channel
-        unsafe { (self.0.vtable.make_mut)(self) };
+        unsafe { (self.vtable.make_mut)(self) };
     }
 
     #[must_use]
     pub fn buffer_flat_bytes(&self) -> &[u8] {
         let len = self.len_flat() * self.primitive_size().get();
         // Safety: The buffer is initialized (invariant of the channel)
-        unsafe { slice::from_raw_parts(self.0.ptr, len) }
+        unsafe { slice::from_raw_parts(self.ptr, len) }
     }
 
     /// Try to view this channel as a `ImageChannelView<TP>`.
@@ -337,7 +378,7 @@ impl<'a> DynamicImageChannelView<'a> {
 
     /// Checks, if the buffer can be viewed as `T`
     pub(crate) fn fits_primitive<T>(&self) -> bool {
-        self.primitive_size().get() == size_of::<T>() && self.0.ptr.cast::<T>().is_aligned()
+        self.primitive_size().get() == size_of::<T>() && self.ptr.cast::<T>().is_aligned()
     }
 
     /// Checks, if the buffer can be viewed as `TP`
@@ -350,14 +391,14 @@ impl<'a> DynamicImageChannelView<'a> {
 impl Drop for DynamicImageChannelView<'_> {
     fn drop(&mut self) {
         // Safety: The vtable is able to work with the channel
-        unsafe { (self.0.vtable.drop)(self) };
+        unsafe { (self.vtable.drop)(self) };
     }
 }
 
 impl Clone for DynamicImageChannelView<'_> {
     fn clone(&self) -> Self {
         // Safety: The vtable is able to work with the channel
-        unsafe { (self.0.vtable.clone)(self) }
+        unsafe { (self.vtable.clone)(self) }
     }
 }
 
@@ -382,7 +423,7 @@ impl Debug for DynamicImageChannelView<'_> {
     }
 }
 
-// Safety: The primitives are Send + Sync and storages have to be thread safe (invariant of `from_unsafe`)
+// Safety: The primitives are Send + Sync and storages have to be thread safe (invariant of `from_raw_parts`)
 unsafe impl Send for DynamicImageChannelView<'_> {}
 unsafe impl Sync for DynamicImageChannelView<'_> {}
 
