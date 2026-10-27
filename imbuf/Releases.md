@@ -9,12 +9,13 @@
   - `DynamicImageChannelView::from_unsafe` and `ImageChannelView::new_with_vtable` create channels of any lifetime, whose buffer has to stay valid for `'a`.
 - Breaking: change `from_flat_interleaved` to work with two params width and height instead of a tuple of the two
 - Breaking: `DynamicImageChannel` is a struct instead of an enum (`U8`, `U16`, `F32`). It only knows the size of its primitive (`DynamicImageChannel::primitive_size`), so its buffer can be viewed as any `bytemuck::Pod` primitive with the same size and alignment.
-  - `DynamicImageChannel::buffer_flat::<T>` and `DynamicImageChannel::primitive_make_mut::<T>` return `None` if the size or alignment of `T` doesn't match.
+    - `DynamicImageChannel::buffer_flat::<T>` and `DynamicImageChannel::make_mut_flat::<T>` return `None` if the size or alignment of `T` doesn't match.
   - `DynamicImageChannel::try_cast`, `DynamicImageChannel::try_cast_mut` and `TryFrom<DynamicImageChannel> for ImageChannel<TP>` (incl. `&`/`&mut`) check `pixel_elements`, the primitive size and the alignment.
   - Add `unsafe DynamicImageChannel::buffer_flat_unchecked::<T>` for callers which know the primitive.
   - `PartialEq` compares the bytes of the buffers (e.g. `NaN == NaN`, but `0.0 != -0.0` for `f32` channels).
   - `DynamicImage::is_uniform` compares the primitive size instead of the primitive type.
 - Breaking: Remove `DynamicSize`, `RuntimePixelType` and `ImageChannel<DynamicSize<_>>`. Use `DynamicImageChannel` instead (e.g. `DynamicImageChannel::new_vec` instead of `ImageChannel::new_vec_dynamic`).
+- Breaking: Rename `Image::buffer_flat_mut` to `make_mut_flat` and `ImageChannel::primitive_make_mut` to `make_mut_flat`  to rise awareness of allocation and use same terminology
 - Breaking: Conversions between `ImageChannel<TP>`/`Image<TP, N>` and `DynamicImageChannel`/`DynamicImage` require `TP::Primitive: bytemuck::Pod`.
 - Breaking: `PixelTypePrimitive` is no longer sealed and has no methods, so custom primitives can be used. Primitives which are not `Pod` (e.g. a wrapper around `NonZeroU8`) work with `Image` and `ImageChannel`, but can't be converted into a `DynamicImage`. Zero sized primitives are rejected at compile time.
 - Breaking: `PixelType` is sealed (primitives and arrays of primitives) and contains `Primitive` directly.

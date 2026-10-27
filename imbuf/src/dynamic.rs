@@ -281,19 +281,19 @@ impl<'a> DynamicImageChannelView<'a> {
     /// Mutable access to the buffer, which is copied if it is shared (copy on write).
     ///
     /// Returns `None`, if the size or the alignment of `T` don't match the primitive of the channel
-    pub fn primitive_make_mut<T: PixelTypePrimitive + Pod>(&mut self) -> Option<&mut [T]> {
+    pub fn make_mut_flat<T: PixelTypePrimitive + Pod>(&mut self) -> Option<&mut [T]> {
         if !self.fits_primitive::<T>() {
             return None;
         }
-        Some(unsafe { self.primitive_make_mut_unchecked() })
+        Some(unsafe { self.make_mut_flat_unchecked() })
     }
 
-    pub(crate) unsafe fn primitive_make_mut_unchecked<T: PixelTypePrimitive>(
-        &mut self,
-    ) -> &mut [T] {
+    pub(crate) unsafe fn make_mut_flat_unchecked<T: PixelTypePrimitive>(&mut self) -> &mut [T] {
         self.make_exclusive();
         // Safety: Size and alignment are checked after make_mut, which might reallocate
-        unsafe { self.buffer_flat_mut_unchecked() }
+        debug_assert!(self.fits_primitive::<T>());
+        // Safety: Forwarded to the caller
+        unsafe { slice::from_raw_parts_mut(self.0.ptr.cast::<T>().cast_mut(), self.len_flat()) }
     }
 
     /// Calls `vtable.make_mut`, so the buffer is exclusively owned by the channel afterwards
@@ -343,14 +343,6 @@ impl<'a> DynamicImageChannelView<'a> {
     /// Checks, if the buffer can be viewed as `TP`
     pub(crate) fn fits_pixel<TP: PixelType>(&self) -> bool {
         self.pixel_elements() == TP::ELEMENTS && self.fits_primitive::<TP::Primitive>()
-    }
-
-    /// # Safety
-    /// See `buffer_flat_unchecked`. Additionally, the buffer must be exclusive (`make_mut`)
-    pub(crate) unsafe fn buffer_flat_mut_unchecked<T>(&mut self) -> &mut [T] {
-        debug_assert!(self.fits_primitive::<T>());
-        // Safety: Forwarded to the caller
-        unsafe { slice::from_raw_parts_mut(self.0.ptr.cast::<T>().cast_mut(), self.len_flat()) }
     }
 }
 
@@ -652,8 +644,7 @@ mod tests {
     fn first_mapped_returns_mut() {
         let ch = Image::<u8, 3>::new_vec(vec![1, 2, 3], NonZeroU32::MIN, NonZeroU32::MIN);
         let mut dynamic = DynamicImage::from(ch);
-        let (first, mut rest) =
-            dynamic.mapped_channels_mut(|x| x.primitive_make_mut::<u8>().unwrap());
+        let (first, mut rest) = dynamic.mapped_channels_mut(|x| x.make_mut_flat::<u8>().unwrap());
         first[0] = 4;
         assert_eq!(2, rest.next().unwrap()[0]);
         assert_eq!(3, rest.next().unwrap()[0]);
@@ -677,15 +668,15 @@ mod tests {
     }
 
     #[test]
-    fn primitive_make_mut_copies_shared_buffer() {
+    fn make_mut_flat_copies_shared_buffer() {
         let data = std::sync::Arc::<[u8]>::from([1].as_slice());
         let image = Image::<u8, 1>::new_arc(data, NonZeroU32::MIN, NonZeroU32::MIN);
         let data_ptr = image.buffer().as_ptr();
         let mut dynamic = DynamicImage::from(image);
         let clone = dynamic.clone();
 
-        assert_eq!(dynamic[0].primitive_make_mut::<u16>(), None);
-        let buffer = dynamic[0].primitive_make_mut::<u8>().unwrap();
+        assert_eq!(dynamic[0].make_mut_flat::<u16>(), None);
+        let buffer = dynamic[0].make_mut_flat::<u8>().unwrap();
         buffer[0] = 2;
         assert_ne!(buffer.as_ptr(), data_ptr);
         assert_eq!(clone.first().buffer_flat::<u8>(), Some(&[1][..]));
@@ -721,11 +712,11 @@ mod tests {
 
         let mut view = ImageView::<u8, 1>::try_from(&mut dynamic).unwrap();
         assert_eq!(view.buffer().as_ptr(), data_ptr, "Reading doesn't copy");
-        view.buffer_flat_mut()[0] = 2;
+        view.make_mut_flat()[0] = 2;
         assert_ne!(view.buffer().as_ptr(), data_ptr);
 
         let view_clone = view.clone();
-        view.buffer_flat_mut()[0] = 3;
+        view.make_mut_flat()[0] = 3;
         assert_eq!(view_clone.buffer(), &[2], "Clones of mutable views copy");
         drop((view, view_clone));
 
@@ -757,7 +748,7 @@ mod tests {
         let data_ptr = data.as_ptr();
         let view = ImageView::<u16, 2>::new_slice_mut(&mut data, NonZeroU32::MIN, NonZeroU32::MIN);
         let mut dynamic = DynamicImageView::from(view);
-        dynamic[1].primitive_make_mut::<u16>().unwrap()[0] = 3;
+        dynamic[1].make_mut_flat::<u16>().unwrap()[0] = 3;
         let back = ImageView::<u16, 2>::try_from(dynamic).unwrap();
         assert_eq!(back.buffers()[0].as_ptr(), data_ptr);
         drop(back);

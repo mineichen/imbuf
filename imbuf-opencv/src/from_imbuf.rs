@@ -104,7 +104,7 @@ impl ImbufAsOpencvMut for DynamicImageChannelView<'_> {
         ) -> opencv::Result<BoxedRefMut<'b, Mat>> {
             let (dims, pixel_elements) = (channel.dimensions(), channel.pixel_elements());
             let error = unsupported_primitive(channel);
-            let flat = channel.primitive_make_mut::<P>().ok_or(error)?;
+            let flat = channel.make_mut_flat::<P>().ok_or(error)?;
             let ptr = flat.as_mut_ptr().cast::<c_void>();
             let mat =
                 unsafe { create_unrestricted_mat::<P>(dims, flat.len(), pixel_elements, ptr) }?;
@@ -141,7 +141,7 @@ where
 {
     fn as_opencv_mut(&mut self) -> opencv::Result<BoxedRefMut<'_, Mat>> {
         let dims = self.dimensions();
-        let flat = self.primitive_make_mut();
+        let flat = self.make_mut_flat();
         let len = flat.len();
         let ptr = flat.as_mut_ptr().cast::<c_void>();
         let mat = unsafe {
@@ -171,7 +171,7 @@ where
 {
     fn as_opencv_mut(&mut self) -> opencv::Result<BoxedRefMut<'_, Mat>> {
         let dims = self.dimensions();
-        let flat = self.buffer_flat_mut();
+        let flat = self.make_mut_flat();
         let ptr = flat.as_mut_ptr().cast::<c_void>();
         let mat = unsafe {
             create_unrestricted_mat::<TP::Primitive>(dims, flat.len(), TP::ELEMENTS, ptr)

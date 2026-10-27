@@ -435,7 +435,7 @@ mod tests {
         let channel = dynamic[0]
             .try_cast_mut::<u8>()
             .expect("Expected U8 channel");
-        channel.primitive_make_mut()[0] = 42;
+        channel.make_mut_flat()[0] = 42;
 
         let channel = dynamic[0].try_cast::<u8>().expect("Expected U8 channel");
         assert_eq!(channel.buffer_flat(), &[42, 2, 3, 4]);
@@ -455,7 +455,7 @@ mod tests {
         let channel = dynamic[0]
             .try_cast_mut::<u8>()
             .expect("Expected U8 channel");
-        channel.primitive_make_mut()[0] = 42;
+        channel.make_mut_flat()[0] = 42;
 
         let channel = dynamic[0].try_cast::<u8>().expect("Expected U8 channel");
         assert_eq!(channel.buffer_flat(), &[42, 2, 3, 4]);
@@ -473,7 +473,7 @@ mod tests {
         let channel = dynamic[0]
             .try_cast_mut::<u8>()
             .expect("Expected U8 channel");
-        channel.primitive_make_mut()[0] = 42;
+        channel.make_mut_flat()[0] = 42;
 
         let channel = dynamic[0].try_cast::<u8>().expect("Expected U8 channel");
         assert_eq!(channel.buffer_flat(), &[42, 2, 3, 4]);
@@ -515,7 +515,7 @@ mod tests {
         let channel = dynamic[1]
             .try_cast_mut::<u16>()
             .expect("Expected U16 channel");
-        channel.primitive_make_mut()[0] = 42;
+        channel.make_mut_flat()[0] = 42;
 
         let channel = dynamic[1].try_cast::<u16>().expect("Expected U16 channel");
         assert_eq!(channel.buffer_flat(), &[42, 6, 7, 8]);

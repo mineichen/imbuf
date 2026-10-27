@@ -318,8 +318,8 @@ impl<'a, T: PixelType> ImageView<'a, T, 1> {
         self.0[0].buffer_flat()
     }
 
-    pub fn buffer_flat_mut(&mut self) -> &mut [T::Primitive] {
-        self.0[0].primitive_make_mut()
+    pub fn make_mut_flat(&mut self) -> &mut [T::Primitive] {
+        self.0[0].make_mut_flat()
     }
 }
 
@@ -470,7 +470,7 @@ mod tests {
     fn first_channel_access() {
         let mut image = Image::<u8, 1>::new_vec(vec![0, 1, 2, 3], NZ_2, NZ_2);
         assert_eq!(image.first().dimensions(), (NZ_2, NZ_2));
-        image.first_mut().primitive_make_mut()[0] = 9;
+        image.first_mut().make_mut_flat()[0] = 9;
         assert_eq!(image.buffer(), &[9, 1, 2, 3]);
     }
 
@@ -515,7 +515,7 @@ mod tests {
         let two = NonZeroU32::new(2).unwrap();
         let mut data = [[1u8, 2], [3, 4]];
         let mut image = ImageView::<[u8; 2], 1>::new_slice_mut(&mut data, two, NonZeroU32::MIN);
-        image.buffer_flat_mut()[3] = 5;
+        image.make_mut_flat()[3] = 5;
         let clone = image.clone();
         image.make_mut()[0][0][0] = 6;
         assert_eq!(clone.buffer(), &[[1, 2], [3, 5]], "Clones copy the buffer");
@@ -557,7 +557,7 @@ mod tests {
             NonZeroU32::MIN,
             NonZeroU32::new(2).unwrap(),
         );
-        image.view_mut().view_mut().buffer_flat_mut()[1] = 3;
+        image.view_mut().view_mut().make_mut_flat()[1] = 3;
         assert_eq!(image.view().view().buffer(), &[1, 3]);
         drop(image);
         assert_eq!(data, [1, 3]);

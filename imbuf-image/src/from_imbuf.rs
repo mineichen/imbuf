@@ -350,7 +350,7 @@ where
     TP: PixelType,
 {
     let (width, height) = channel.dimensions();
-    ImageBuffer::from_raw(width.get(), height.get(), channel.primitive_make_mut())
+    ImageBuffer::from_raw(width.get(), height.get(), channel.make_mut_flat())
         .expect("Incompatible buffer size")
 }
 
