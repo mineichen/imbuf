@@ -1,13 +1,12 @@
 # 0.4.0
 
 - Breaking: Channels and images have a lifetime `'a` for borrowed buffers, which is `'static` for owned buffers. Borrowed images can be created ad-hoc (e.g. from a slice of another library) without an owned `ImageChannel` to refer to.
-  - Rename `ImageChannels<[T; N]>` to `GenericImage<'a, T, N>`, which always contains `[GenericImageChannel<'a, T>; N]`. `Image<T, N>` is an alias of `GenericImage<'static, T, N>`.
-  - `ImageChannel<TP>` is an alias of `GenericImageChannel<'static, TP>`, `DynamicImageChannel` of `GenericDynamicImageChannel<'static>` and `DynamicImage` of `GenericDynamicImage<'static>`.
-  - `ImageRef<'a, T, N>` is an alias of `GenericImage<'a, T, N>` instead of `ImageChannels<[&'a ImageChannel<T>; N]>`. Use `GenericImage::view` instead of `ImageRef::try_from([&channel])`.
-  - Remove `ImageMut` and `BorrowableImageChannel`. `TryFrom<&mut GenericDynamicImage> for ImageRef` and `GenericImage::view_mut` create borrowed images, which write into the borrowed buffers.
-  - Add `GenericImageChannel::new_slice`/`new_slice_mut`, `GenericImageChannel::view`/`view_mut` and the same methods on `GenericImage`. Shared borrows copy the buffer on mutable access, exclusive borrows write into the borrowed buffer and copy it on `clone`.
-  - The functions of `ImageChannelVTable` receive a `GenericDynamicImageChannel<'a>` and have to be generic over `'a` (e.g. `unsafe extern "C-unwind" fn clone<'a>(&GenericDynamicImageChannel<'a>) -> GenericDynamicImageChannel<'a>`).
-  - `GenericDynamicImageChannel::from_unsafe` and `GenericImageChannel::new_with_vtable` create channels of any lifetime, whose buffer has to stay valid for `'a`.
+  - Rename `ImageChannels<[T; N]>` to `ImageView<'a, T, N>`, which always contains `[ImageChannelView<'a, T>; N]`. `Image<T, N>` is an alias of `ImageView<'static, T, N>`.
+  - `ImageChannel<TP>` is an alias of `ImageChannelView<'static, TP>`, `DynamicImageChannel` of `DynamicImageChannelView<'static>` and `DynamicImage` of `DynamicImageView<'static>`.
+  - Remove `ImageRef`, `ImageMut` and `BorrowableImageChannel` with ImageView. `TryFrom<&mut DynamicImageView> for ImageView` and `ImageView::view_mut` create borrowed images, which write into the borrowed buffers.
+  - Add `ImageChannelView::new_slice`/`new_slice_mut`, `ImageChannelView::view`/`view_mut` and the same methods on `ImageView`. Shared borrows copy the buffer on mutable access, exclusive borrows write into the borrowed buffer and copy it on `clone`.
+  - The functions of `ImageChannelVTable` receive a `DynamicImageChannelView<'a>` and have to be generic over `'a` (e.g. `unsafe extern "C-unwind" fn clone<'a>(&DynamicImageChannelView<'a>) -> DynamicImageChannelView<'a>`).
+  - `DynamicImageChannelView::from_unsafe` and `ImageChannelView::new_with_vtable` create channels of any lifetime, whose buffer has to stay valid for `'a`.
 - Breaking: `DynamicImageChannel` is a struct instead of an enum (`U8`, `U16`, `F32`). It only knows the size of its primitive (`DynamicImageChannel::primitive_size`), so its buffer can be viewed as any `bytemuck::Pod` primitive with the same size and alignment.
   - `DynamicImageChannel::buffer_flat::<T>` and `DynamicImageChannel::primitive_make_mut::<T>` return `None` if the size or alignment of `T` doesn't match.
   - `DynamicImageChannel::try_cast`, `DynamicImageChannel::try_cast_mut` and `TryFrom<DynamicImageChannel> for ImageChannel<TP>` (incl. `&`/`&mut`) check `pixel_elements`, the primitive size and the alignment.

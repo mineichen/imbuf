@@ -5,7 +5,7 @@ use std::{
 
 use bytemuck::Pod;
 use imbuf::{
-    GenericDynamicImage, GenericDynamicImageChannel, GenericImage, GenericImageChannel, PixelType,
+    DynamicImageChannelView, DynamicImageView, ImageChannelView, ImageView, PixelType,
     PixelTypePrimitive,
 };
 use opencv::{
@@ -42,11 +42,7 @@ pub trait ImbufAsOpencvMut: ImbufAsOpencv {
     fn as_opencv_mut(&mut self) -> opencv::Result<BoxedRefMut<'_, Mat>>;
 }
 
-// ---------------------------------------------------------------------------
-// GenericDynamicImage
-// ---------------------------------------------------------------------------
-
-fn ensure_single_channel(image: &GenericDynamicImage<'_>) -> opencv::Result<()> {
+fn ensure_single_channel(image: &DynamicImageView<'_>) -> opencv::Result<()> {
     (image.len() == 1).then_some(()).ok_or_else(|| {
         opencv::Error::new(
             Code::StsUnsupportedFormat.into(),
@@ -55,24 +51,20 @@ fn ensure_single_channel(image: &GenericDynamicImage<'_>) -> opencv::Result<()> 
     })
 }
 
-impl ImbufAsOpencv for GenericDynamicImage<'_> {
+impl ImbufAsOpencv for DynamicImageView<'_> {
     fn as_opencv(&self) -> opencv::Result<BoxedRef<'_, Mat>> {
         ensure_single_channel(self)?;
         self.first().as_opencv()
     }
 }
-impl ImbufAsOpencvMut for GenericDynamicImage<'_> {
+impl ImbufAsOpencvMut for DynamicImageView<'_> {
     fn as_opencv_mut(&mut self) -> opencv::Result<BoxedRefMut<'_, Mat>> {
         ensure_single_channel(self)?;
         self[0].as_opencv_mut()
     }
 }
 
-// ---------------------------------------------------------------------------
-// GenericDynamicImageChannel
-// ---------------------------------------------------------------------------
-
-fn unsupported_primitive(channel: &GenericDynamicImageChannel<'_>) -> opencv::Error {
+fn unsupported_primitive(channel: &DynamicImageChannelView<'_>) -> opencv::Error {
     opencv::Error::new(
         Code::StsUnsupportedFormat.into(),
         format!(
@@ -82,10 +74,10 @@ fn unsupported_primitive(channel: &GenericDynamicImageChannel<'_>) -> opencv::Er
     )
 }
 
-impl ImbufAsOpencv for GenericDynamicImageChannel<'_> {
+impl ImbufAsOpencv for DynamicImageChannelView<'_> {
     fn as_opencv(&self) -> opencv::Result<BoxedRef<'_, Mat>> {
         fn view<'b, P: PixelTypePrimitive + Pod + DataType>(
-            channel: &'b GenericDynamicImageChannel<'_>,
+            channel: &'b DynamicImageChannelView<'_>,
         ) -> opencv::Result<BoxedRef<'b, Mat>> {
             let flat = channel
                 .buffer_flat::<P>()
@@ -105,10 +97,10 @@ impl ImbufAsOpencv for GenericDynamicImageChannel<'_> {
         }
     }
 }
-impl ImbufAsOpencvMut for GenericDynamicImageChannel<'_> {
+impl ImbufAsOpencvMut for DynamicImageChannelView<'_> {
     fn as_opencv_mut(&mut self) -> opencv::Result<BoxedRefMut<'_, Mat>> {
         fn view<'b, P: PixelTypePrimitive + Pod + DataType>(
-            channel: &'b mut GenericDynamicImageChannel<'_>,
+            channel: &'b mut DynamicImageChannelView<'_>,
         ) -> opencv::Result<BoxedRefMut<'b, Mat>> {
             let (dims, pixel_elements) = (channel.dimensions(), channel.pixel_elements());
             let error = unsupported_primitive(channel);
@@ -128,11 +120,7 @@ impl ImbufAsOpencvMut for GenericDynamicImageChannel<'_> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// GenericImageChannel
-// ---------------------------------------------------------------------------
-
-impl<TP: PixelType> ImbufAsOpencv for GenericImageChannel<'_, TP>
+impl<TP: PixelType> ImbufAsOpencv for ImageChannelView<'_, TP>
 where
     TP::Primitive: DataType,
 {
@@ -147,7 +135,7 @@ where
         Ok(BoxedRef::from(mat))
     }
 }
-impl<TP: PixelType> ImbufAsOpencvMut for GenericImageChannel<'_, TP>
+impl<TP: PixelType> ImbufAsOpencvMut for ImageChannelView<'_, TP>
 where
     TP::Primitive: DataType,
 {
@@ -163,11 +151,7 @@ where
     }
 }
 
-// ---------------------------------------------------------------------------
-// GenericImage<'_, TP, 1>
-// ---------------------------------------------------------------------------
-
-impl<TP: PixelType> ImbufAsOpencv for GenericImage<'_, TP, 1>
+impl<TP: PixelType> ImbufAsOpencv for ImageView<'_, TP, 1>
 where
     TP::Primitive: DataType,
 {
@@ -181,7 +165,7 @@ where
         Ok(BoxedRef::from(mat))
     }
 }
-impl<TP: PixelType> ImbufAsOpencvMut for GenericImage<'_, TP, 1>
+impl<TP: PixelType> ImbufAsOpencvMut for ImageView<'_, TP, 1>
 where
     TP::Primitive: DataType,
 {
@@ -229,7 +213,7 @@ unsafe fn create_unrestricted_mat<P: DataType>(
 mod tests {
     use std::num::NonZeroU32;
 
-    use imbuf::{DynamicImage, DynamicImageChannel, Image, ImageRef, PixelTypePrimitive};
+    use imbuf::{DynamicImage, DynamicImageChannel, Image, PixelTypePrimitive};
     use opencv::core::{VecN, Vector};
     use opencv::prelude::{MatTraitConst, MatTraitConstManual, MatTraitManual};
 
@@ -331,7 +315,7 @@ mod tests {
         let height = NonZeroU32::new(1).unwrap();
         let mut data = [1u8, 2];
         {
-            let mut img = ImageRef::<u8, 1>::new_slice_mut(&mut data, width, height);
+            let mut img = ImageView::<u8, 1>::new_slice_mut(&mut data, width, height);
             let mut mat = img.as_opencv_mut().unwrap();
             mat.data_typed_mut::<u8>().unwrap()[1] = 42;
         }

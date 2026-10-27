@@ -15,7 +15,7 @@ This crate provides utilities functions to go from one representation to the oth
 
 ## Channels
 
-[`GenericImageChannel`] is a composeable building block for [`GenericImage`]. If you have a special Image kind, where channels are not uniform,
+[`ImageChannelView`] is a composeable building block for [`ImageView`]. If you have a special Image kind, where channels are not uniform,
 feel encouraged to add your own typed Image, which implement `TryFrom<DynamicImage>` and `Into<DynamicImage>`.
 
 ## Primitives and dynamic channels
@@ -35,34 +35,34 @@ The `Image` struct represents a fully typed Image to support the most common ima
 | `Image<u8, 3>`           | RGB8 planar                                                   |
 | `Image<[u8; 4], 1>`      | RGBA8 interleaved                                             |
 | `Image<f32, 2>`          | LUMAA32F planar                                               |
-| `ImageRef<'a, u8, 1>`    | LUMA8, where buffers might be borrowed for `'a`               |
-| `ImageRef<'a, [u16; 3], 1>` | RGB16 interleaved, where buffers might be borrowed for `'a` |
+| `ImageView<'a, u8, 1>`    | LUMA8, where buffers might be borrowed for `'a`               |
+| `ImageView<'a, [u16; 3], 1>` | RGB16 interleaved, where buffers might be borrowed for `'a` |
 
 ## Owned and borrowed images
 
 Channels and images have a lifetime `'a`, which is `'static` if they own their buffers
 ([`ImageChannel`], [`Image`], [`DynamicImageChannel`], [`DynamicImage`]). Borrowed buffers are
-represented by the same types with a shorter lifetime ([`GenericImageChannel`], [`ImageRef`],
-[`GenericDynamicImageChannel`], [`GenericDynamicImage`]), so they can be created ad-hoc, e.g. from a
+represented by the same types with a shorter lifetime ([`ImageChannelView`], [`ImageView`],
+[`DynamicImageChannelView`], [`DynamicImageView`]), so they can be created ad-hoc, e.g. from a
 slice of another library, without having an owned `ImageChannel` to refer to.
 
-- Shared borrows (e.g. [`GenericImage::new_slice`], [`GenericImage::view`] or `ImageRef::try_from(&dynamic)`)
-  copy the buffer on mutable access (e.g. [`GenericImage::make_mut`]).
-- Exclusive borrows (e.g. [`GenericImage::new_slice_mut`], [`GenericImage::view_mut`] or
-  `ImageRef::try_from(&mut dynamic)`) write into the borrowed buffer. Clones copy the buffer.
+- Shared borrows (e.g. [`ImageView::new_slice`], [`ImageView::view`] or `ImageView::try_from(&dynamic)`)
+  copy the buffer on mutable access (e.g. [`ImageView::make_mut`]).
+- Exclusive borrows (e.g. [`ImageView::new_slice_mut`], [`ImageView::view_mut`] or
+  `ImageView::try_from(&mut dynamic)`) write into the borrowed buffer. Clones copy the buffer.
 
 ```rust
 use std::num::NonZeroU32;
-use imbuf::{GenericDynamicImage, ImageRef};
+use imbuf::{DynamicImageView, ImageView};
 
 let mut data = [1u8, 2, 3, 4];
 let two = NonZeroU32::new(2).unwrap();
 {
-    let mut image = ImageRef::<u8, 1>::new_slice_mut(&mut data, two, two);
+    let mut image = ImageView::<u8, 1>::new_slice_mut(&mut data, two, two);
     image.make_mut()[0][0] = 5;
     // Borrowed images can be converted to dynamic images and back
-    let dynamic = GenericDynamicImage::from(image);
-    let image = ImageRef::<u8, 1>::try_from(&dynamic).unwrap();
+    let dynamic = DynamicImageView::from(image);
+    let image = ImageView::<u8, 1>::try_from(&dynamic).unwrap();
     assert_eq!(image.buffer(), &[5, 2, 3, 4]);
 }
 assert_eq!(data, [5, 2, 3, 4]);
