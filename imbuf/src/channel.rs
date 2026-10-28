@@ -61,39 +61,49 @@ impl<TP: PixelType> ImageChannel<TP> {
     /// Panics if the buffer size is not compatible with the width and height.
     #[must_use]
     pub fn new_vec(input: Vec<TP>, width: NonZeroU32, height: NonZeroU32) -> Self {
+        // Panic, if the multiplication of the dimensions overflows or the length mismatches,
+        // instead of comparing against a wrapped value
         assert_eq!(
-            input.len(),
-            calc_pixel_len_packed(width, height),
+            DynamicImageChannelView::ensure_valid_len(width, height, input.len()),
+            Ok(()),
             "Incompatible Buffer-Size"
         );
 
-        // Cast Vec<TP> to Vec<TP::Primitive>
-        let mut input = mem::ManuallyDrop::new(input);
-        let ptr = input.as_mut_ptr().cast::<TP::Primitive>();
-        let len = input.len() * TP::ELEMENTS.get() as usize;
-        let cap = input.capacity() * TP::ELEMENTS.get() as usize;
+        let flat_input = crate::pixel::flat_vec(input);
 
-        // Safety: TP::Primitive is expected to be an aligned fraction of TP
-        let cast_input = unsafe { Vec::from_raw_parts(ptr, len, cap) };
-
-        let channel = DynamicImageChannel::from_vec(cast_input, width, height, TP::ELEMENTS);
         // Safety: The vtable is built for TP::Primitive with TP::ELEMENTS
-        unsafe { Self::from_dynamic_unchecked(channel) }
+        unsafe {
+            let channel = DynamicImageChannel::from_vec_flat_unchecked(
+                flat_input,
+                width,
+                height,
+                TP::ELEMENTS,
+            );
+
+            Self::from_dynamic_unchecked(channel)
+        }
     }
 
     /// # Panics
     /// Panics if the buffer size is not compatible with the width and height.
     #[must_use]
     pub fn new_arc(input: Arc<[TP]>, width: NonZeroU32, height: NonZeroU32) -> Self {
-        let len = input.len() * TP::ELEMENTS.get() as usize;
-        let ptr = Arc::into_raw(input).cast::<TP::Primitive>();
+        assert_eq!(
+            DynamicImageChannel::ensure_valid_len(width, height, input.len()),
+            Ok(())
+        );
 
-        // Safety: TP::Primitive is expected to be an aligned fraction of TP
-        let cast_input = unsafe { Arc::from_raw(ptr::slice_from_raw_parts(ptr, len)) };
-
-        let channel = DynamicImageChannel::from_arc(cast_input, width, height, TP::ELEMENTS);
-        // Safety: The vtable is built for TP::Primitive with TP::ELEMENTS
-        unsafe { Self::from_dynamic_unchecked(channel) }
+        let flat_input = crate::pixel::flat_arc(input);
+        unsafe {
+            // Safety: The vtable is built for TP::Primitive with TP::ELEMENTS
+            let ch = DynamicImageChannel::from_arc_flat_unchecked(
+                flat_input,
+                width,
+                height,
+                TP::ELEMENTS,
+            );
+            Self::from_dynamic_unchecked(ch)
+        }
     }
 }
 
@@ -105,9 +115,11 @@ impl<'a, TP: PixelType> ImageChannelView<'a, TP> {
     /// Panics if the buffer size is not compatible with the width and height.
     #[must_use]
     pub fn new_slice(input: &'a [TP], width: NonZeroU32, height: NonZeroU32) -> Self {
+        // Panic, if the multiplication of the dimensions overflows or the length mismatches,
+        // instead of comparing against a wrapped value
         assert_eq!(
-            input.len(),
-            calc_pixel_len_packed(width, height),
+            DynamicImageChannelView::ensure_valid_len(width, height, input.len()),
+            Ok(()),
             "Incompatible Buffer-Size"
         );
         // Safety: The size is checked and the buffer is borrowed for 'a
@@ -130,9 +142,11 @@ impl<'a, TP: PixelType> ImageChannelView<'a, TP> {
     /// Panics if the buffer size is not compatible with the width and height.
     #[must_use]
     pub fn new_slice_mut(input: &'a mut [TP], width: NonZeroU32, height: NonZeroU32) -> Self {
+        // Panic, if the multiplication of the dimensions overflows or the length mismatches,
+        // instead of comparing against a wrapped value
         assert_eq!(
-            input.len(),
-            calc_pixel_len_packed(width, height),
+            DynamicImageChannelView::ensure_valid_len(width, height, input.len()),
+            Ok(()),
             "Incompatible Buffer-Size"
         );
         // Safety: The size is checked and the buffer is exclusively borrowed for 'a
@@ -428,23 +442,6 @@ pub struct ImageChannelVTable {
     pub primitive_size: extern "C-unwind" fn() -> NonZeroUsize,
 }
 
-pub(crate) const fn calc_pixel_len_packed(width: NonZeroU32, height: NonZeroU32) -> usize {
-    #[allow(clippy::cast_possible_truncation)]
-    let width_usize = width.get() as usize;
-    #[allow(clippy::cast_possible_truncation)]
-    let height_usize = height.get() as usize;
-
-    width_usize * height_usize
-}
-
-pub(crate) const fn calc_pixel_len_flat(
-    width: NonZeroU32,
-    height: NonZeroU32,
-    pixel_elements: NonZeroU8,
-) -> usize {
-    calc_pixel_len_packed(width, height) * pixel_elements.get() as usize
-}
-
 /// `ImageChannelVTable::primitive_size` for the primitive `T`
 pub(crate) extern "C-unwind" fn primitive_size<T>() -> NonZeroUsize {
     const { NonZeroUsize::new(size_of::<T>()).expect("Zero sized primitives are not supported") }
@@ -513,8 +510,8 @@ mod tests {
     fn into_vec_with_capacity_which_is_no_multiple_of_pixel_elements() {
         let size = NonZeroU32::MIN;
         let mut data = Vec::with_capacity(4);
-        data.extend_from_slice(&[1u8, 2, 3]);
-        let dynamic = DynamicImageChannel::new_vec(data, size, size, NonZeroU8::new(3).unwrap());
+        data.extend_from_slice(&[[1u8, 2, 3]]);
+        let dynamic = DynamicImageChannel::new_vec(data, size, size);
         let typed = ImageChannel::<[u8; 3]>::try_from(dynamic).unwrap();
         assert_eq!(typed.into_vec(), vec![[1, 2, 3]]);
     }

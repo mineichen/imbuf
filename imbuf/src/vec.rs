@@ -5,26 +5,36 @@ use std::{
 
 use crate::{
     DynamicImageChannel, DynamicImageChannelView, PixelTypePrimitive,
-    channel::{ChannelFactory, ImageChannelVTable, calc_pixel_len_flat, primitive_size},
+    channel::{ChannelFactory, ImageChannelVTable, primitive_size},
 };
 
 struct VecFactory;
 
 impl DynamicImageChannel {
-    /// In contrast to the public constructors, `T` doesn't have to be `Pod`. Don't expose the
-    /// result as `DynamicImageChannel`, unless `T` is `Pod`
-    ///
-    /// # Panics
-    /// Panics if the buffer size is not compatible with the width, height and `pixel_elements`.
-    pub(crate) fn from_vec<T: PixelTypePrimitive>(
+    /// #Safety
+    /// In contrast to the public constructors, `T` doesn't have to be `Pod`.
+    /// This is only ok, if the DynamicImageChannel lives inside a ImageChannel, where it cannot be extracted.
+    /// `DynamicImageChannel` themself may never have !Pod primitives, because upcasting just occurs based on size/alignment
+    /// You could easily transform Image<NonZeroU8> into a DynamicImage and turn it into `Image<u8>` and modify it.
+    /// The drop function, which assumes `NonZeroU8` could get Zero values, which is UB.
+    /// Furthermore, width/height/pixel_elements are not checked against input.len() or for overflows
+    #[must_use]
+    pub unsafe fn from_vec_flat_unchecked<T: PixelTypePrimitive>(
         input: Vec<T>,
         width: NonZeroU32,
         height: NonZeroU32,
         pixel_elements: NonZeroU8,
     ) -> Self {
-        assert_eq!(
-            input.len(),
-            calc_pixel_len_flat(width, height, pixel_elements),
+        // Panic, if the multiplication of the dimensions overflows or the length mismatches,
+        // instead of comparing against a wrapped value
+        debug_assert_eq!(
+            DynamicImageChannelView::ensure_valid_flat_len(
+                width,
+                height,
+                pixel_elements,
+                input.len()
+            ),
+            Ok(()),
             "Incompatible Buffer-Size"
         );
         let mut input = ManuallyDrop::new(input);

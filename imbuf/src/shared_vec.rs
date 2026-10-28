@@ -7,7 +7,8 @@ use std::{
 
 use crate::{
     DynamicImageChannel, DynamicImageChannelView, ImageChannel, PixelType, PixelTypePrimitive,
-    channel::{ChannelFactory, ImageChannelVTable, calc_pixel_len_flat, primitive_size},
+    channel::{ChannelFactory, ImageChannelVTable, primitive_size},
+    dynamic::flat_len_checked,
 };
 
 /// Internal structure that holds a Vec (as raw parts) and reference counts
@@ -88,22 +89,25 @@ unsafe extern "C-unwind" fn clone_shared_vec<'a, T: 'static, const CHANNELS: usi
 }
 
 unsafe extern "C-unwind" fn make_mut_shared_vec<T: PixelTypePrimitive, const CHANNELS: usize>(
-    image: &mut DynamicImageChannelView<'_>,
+    channel: &mut DynamicImageChannelView<'_>,
 ) {
-    let metadata = unsafe { metadata::<T, CHANNELS>(image) };
+    let metadata = unsafe { metadata::<T, CHANNELS>(channel) };
     let is_unique =
         unsafe { (*metadata.data_ptr).slice_refs[metadata.slice_idx].load(Ordering::Acquire) == 1 };
 
     if !is_unique {
         // Safety: The vtable is built for T
-        let copy = unsafe { image.buffer_flat_unchecked::<T>() }.to_vec();
+        let copy = unsafe { channel.buffer_flat_unchecked::<T>() }.to_vec();
         // Assigning drops the previous channel, which releases its share of the Vec
-        *image = DynamicImageChannel::from_vec(
-            copy,
-            image.width(),
-            image.height(),
-            image.pixel_elements(),
-        );
+        // Safety: Since we got a DynamicImageChannelView as input, sizes are valid
+        *channel = unsafe {
+            DynamicImageChannel::from_vec_flat_unchecked(
+                copy,
+                channel.width(),
+                channel.height(),
+                channel.pixel_elements(),
+            )
+        };
     }
 }
 
@@ -140,17 +144,24 @@ impl<T: PixelTypePrimitive, const CHANNELS: usize> ChannelFactory<T>
 }
 
 /// Create `ImageChannels` from a Vec, sharing the underlying storage
+/// #Panics
+/// If any size exceeds usize::MAX
 pub fn create_shared_channels<TP: PixelType, const CHANNELS: usize>(
     mut vec: Vec<TP::Primitive>,
     sizes: [(NonZeroU32, NonZeroU32); CHANNELS],
 ) -> [ImageChannel<TP>; CHANNELS] {
-    assert_eq!(
-        vec.len(),
-        sizes
-            .iter()
-            .map(|&(width, height)| calc_pixel_len_flat(width, height, TP::ELEMENTS))
-            .sum::<usize>()
-    );
+    // Panic, if the multiplication of the dimensions or the sum overflows, instead of comparing
+    // against wrapped values
+
+    let lens: [usize; CHANNELS] = sizes.map(|(width, height)| {
+        flat_len_checked(width, height, TP::ELEMENTS).expect("The buffer length overflows usize")
+    });
+    let total = lens
+        .iter()
+        // Panic, if the sum overflows, instead of comparing against a wrapped value
+        .try_fold(0usize, |total, &len| total.checked_add(len))
+        .expect("The buffer length overflows usize");
+    assert_eq!(total, vec.len(), "Incompatible Buffer-Size");
     // Create SharedVecData
     let base = vec.as_mut_ptr();
     let shared_data = Box::new(SharedVecData::<TP::Primitive, CHANNELS>::new(vec));
@@ -171,7 +182,10 @@ pub fn create_shared_channels<TP: PixelType, const CHANNELS: usize>(
 
         // Safety: The slice is within the Vec, as the total length is checked above
         let ptr = unsafe { base.add(start) };
-        start += calc_pixel_len_flat(width, height, TP::ELEMENTS);
+        // All lengths are part of the total, which is checked above to be the Vec length, so
+        // adding them and the subsequent additions of `start` cannot overflow
+        let len = lens[i];
+        start += len;
 
         // Safety: The Vec keeps the slice alive until the vtable drops it and the vtable is
         // built for TP::Primitive with TP::ELEMENTS

@@ -11,10 +11,8 @@ use std::{
 use bytemuck::Pod;
 
 use crate::{
-    ImageChannelView, ImageView, PixelType, PixelTypePrimitive,
-    channel::{ImageChannelVTable, calc_pixel_len_flat, calc_pixel_len_packed},
+    ImageChannelView, ImageView, PixelType, PixelTypePrimitive, channel::ImageChannelVTable,
 };
-
 /// Image with number of channels and their types and dimensions only known at runtime
 /// There are no guarantees that the types or dimensions of channels match. See [`ImageView`] for more information.
 /// The public interface is designed, so it can be extended to support images, which cannot be represented with Image (e.g. 1 Channel u8 and the other f32)
@@ -184,13 +182,17 @@ impl DynamicImageChannel {
     /// # Panics
     /// Panics if the buffer size is not compatible with the width, height and `pixel_elements`.
     #[must_use]
-    pub fn new_vec<T: PixelTypePrimitive + Pod>(
+    pub fn new_vec<T: PixelType + Pod>(
         data: Vec<T>,
         width: NonZeroU32,
         height: NonZeroU32,
-        pixel_elements: NonZeroU8,
     ) -> Self {
-        Self::from_vec(data, width, height, pixel_elements)
+        assert_eq!(
+            DynamicImageChannel::ensure_valid_len(width, height, data.len()),
+            Ok(())
+        );
+        let data_flat = crate::pixel::flat_vec(data);
+        unsafe { Self::from_vec_flat_unchecked(data_flat, width, height, T::ELEMENTS) }
     }
 }
 
@@ -200,13 +202,19 @@ impl<'a> DynamicImageChannelView<'a> {
     /// # Safety
     /// The following invariants have to hold:
     /// - The size of the buffer in bytes (`width * height * pixel_elements * vtable.primitive_size()`)
-    ///   doesn't exceed `isize::MAX`.
+    ///   doesn't exceed `usize::MAX`, and the multiplications to calculate it don't overflow
+    ///   `usize`, which implies that `width * height * pixel_elements` matches the buffer length.
+    ///   [`DynamicImageChannelView::ensure_valid_flat_len`] checks this, e.g. for untrusted input.
     /// - `ptr` points to an initialized buffer of that size, which stays valid until `vtable.drop`
     ///   is called and at least for `'a`. The buffer can be shared between instances.
     /// - `vtable` is able to work with `ptr` and `data` (see [`ImageChannelVTable`](crate::ImageChannelVTable)).
     ///   Any bytes written through a `Pod` view of the buffer have to be valid for the vtable
     ///   (e.g. the primitive of the vtable is `Pod` itself).
     /// - `ptr` and `data` can be sent to and shared between threads.
+    ///
+    /// # Panics
+    /// In debug builds, panics if `width * height * pixel_elements` or the buffer size in bytes
+    /// overflows `usize`.
     #[must_use]
     pub unsafe fn from_raw_parts(
         ptr: *const u8,
@@ -287,14 +295,76 @@ impl<'a> DynamicImageChannelView<'a> {
     #[must_use]
     #[allow(clippy::len_without_is_empty)]
     pub const fn len(&self) -> usize {
-        calc_pixel_len_packed(self.width, self.height)
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "Overflow checked during construction"
+        )]
+        let width = self.width.get() as usize;
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "Overflow checked during construction"
+        )]
+        let height = self.height.get() as usize;
+        width * height
     }
 
     /// Number of primitives in the buffer (`width * height * pixel_elements`)
     #[allow(clippy::len_without_is_empty)]
     #[must_use]
     pub const fn len_flat(&self) -> usize {
-        calc_pixel_len_flat(self.width, self.height, self.pixel_elements)
+        self.len() * self.pixel_elements.get() as usize
+    }
+
+    /// Checks that `width * height * pixel_elements` doesn't overflow `usize` and matches
+    /// `buffer_len`, e.g. to validate untrusted dimensions before passing them to
+    /// [`DynamicImageChannelView::from_raw_parts`]. For buffers, which store one element per
+    /// pixel, [`DynamicImageChannelView::ensure_valid_len`] can be used instead.
+    ///
+    /// # Errors
+    /// Returns [`InvalidLenError::LenOverflow`], if the multiplication overflows `usize`, and
+    /// [`InvalidLenError::BufferMismatch`], if it doesn't match `buffer_len`.
+    pub const fn ensure_valid_flat_len(
+        width: NonZeroU32,
+        height: NonZeroU32,
+        pixel_elements: NonZeroU8,
+        buffer_len: usize,
+    ) -> Result<(), InvalidLenError> {
+        match flat_len_checked(width, height, pixel_elements) {
+            Ok(len) if len == buffer_len => Ok(()),
+            Ok(_) => Err(InvalidLenError::BufferMismatch),
+            Err(e) => Err(InvalidLenError::Overflow(e)),
+        }
+    }
+
+    /// Checks that `width * height` (the number of pixels) doesn't overflow `usize` and matches
+    /// `buffer_len`, e.g. to validate untrusted dimensions for a buffer, which stores one element
+    /// per pixel (like the buffers of [`ImageChannel::new_vec`]). For buffers, which store
+    /// multiple primitives per pixel, use [`DynamicImageChannelView::ensure_valid_flat_len`].
+    ///
+    /// # Errors
+    /// Returns [`InvalidLenError::LenOverflow`], if the multiplication overflows `usize`, and
+    /// [`InvalidLenError::BufferMismatch`], if it doesn't match `buffer_len`.
+    pub const fn ensure_valid_len(
+        width: NonZeroU32,
+        height: NonZeroU32,
+        buffer_len: usize,
+    ) -> Result<(), InvalidLenError> {
+        // A buffer with one element per pixel is a flat buffer with one primitive per pixel
+        Self::ensure_valid_flat_len(width, height, NonZeroU8::MIN, buffer_len)
+    }
+
+    pub fn buffer<T: PixelType + Pod>(&self) -> Option<&[T]> {
+        self.fits_pixel::<T>()
+            .then(|| unsafe { self.buffer_unchecked() })
+    }
+
+    pub unsafe fn buffer_unchecked<T: PixelType>(&self) -> &[T] {
+        debug_assert!(
+            self.fits_pixel::<T>(),
+            "The size or alignment of {} doesn't match the channel",
+            std::any::type_name::<T>()
+        );
+        unsafe { slice::from_raw_parts(self.ptr.cast::<T>(), self.len()) }
     }
 
     /// Returns `None`, if the size or the alignment of `T` don't match the primitive of the channel
@@ -309,7 +379,7 @@ impl<'a> DynamicImageChannelView<'a> {
     /// `T` must have the size of the channels primitive, `ptr` must be aligned for `T` and the
     /// buffer must contain valid values of `T`.
     #[must_use]
-    pub unsafe fn buffer_flat_unchecked<T>(&self) -> &[T] {
+    pub unsafe fn buffer_flat_unchecked<T: PixelTypePrimitive>(&self) -> &[T] {
         debug_assert!(
             self.fits_primitive::<T>(),
             "The size or alignment of {} doesn't match the channel",
@@ -450,6 +520,54 @@ pub struct IncompatibleImageError<TInput> {
     #[allow(dead_code)]
     pub(crate) reason: IncompatibleImageErrorReason,
 }
+
+/// Error of [`DynamicImageChannelView::ensure_valid_flat_len`]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum InvalidLenError {
+    #[error(transparent)]
+    Overflow(#[from] OverflowBufferLenError),
+    /// The buffer length doesn't match `width * height * pixel_elements`
+    #[error("The buffer length doesn't match the dimensions")]
+    BufferMismatch,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq, Clone)]
+#[error("The multiplication of the dimensions overflows `usize`")]
+pub struct OverflowBufferLenError {
+    width: NonZeroU32,
+    height: NonZeroU32,
+    pixel_elements: NonZeroU8,
+}
+
+/// `width * height * pixel_elements` as `usize`, or `None`, if the multiplication overflows
+///
+/// The calculation is done in `u64`, so it cannot truncate on targets with a smaller `usize`
+/// (see the assertion below). The product of the two `u32` dimensions always fits `u64`, only
+/// the multiplication with `pixel_elements` can overflow it.
+pub(crate) const fn flat_len_checked(
+    width: NonZeroU32,
+    height: NonZeroU32,
+    pixel_elements: NonZeroU8,
+) -> Result<usize, OverflowBufferLenError> {
+    #[allow(clippy::cast_lossless)]
+    let packed = (width.get() as u64) * (height.get() as u64);
+    #[allow(clippy::cast_lossless)]
+    match packed.checked_mul(pixel_elements.get() as u64) {
+        Some(len) if len <= usize::MAX as u64 => {
+            // The value is checked above to fit into `usize`
+            #[allow(clippy::cast_possible_truncation)]
+            Ok(len as usize)
+        }
+        _ => Err(OverflowBufferLenError {
+            width,
+            height,
+            pixel_elements,
+        }),
+    }
+}
+
+// `usize as u64` is only lossless, if `usize` doesn't exceed 8 bytes
+const _: () = assert!(size_of::<usize>() <= size_of::<u64>());
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -635,10 +753,68 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU32;
+    use std::num::{NonZeroU8, NonZeroU32};
 
     use super::*;
     use crate::{Image, ImageChannel, ImageView};
+
+    #[test]
+    fn ensure_valid_flat_len() {
+        let two = NonZeroU32::new(2).unwrap();
+        let three = NonZeroU32::new(3).unwrap();
+        let two_elements = NonZeroU8::new(2).unwrap();
+        assert_eq!(
+            DynamicImageChannelView::ensure_valid_flat_len(two, three, two_elements, 12),
+            Ok(())
+        );
+        assert_eq!(
+            DynamicImageChannelView::ensure_valid_flat_len(two, three, two_elements, 11),
+            Err(InvalidLenError::BufferMismatch)
+        );
+        // The multiplication with `pixel_elements` overflows even `u64` (on any target)
+        assert_eq!(
+            DynamicImageChannelView::ensure_valid_flat_len(
+                NonZeroU32::MAX,
+                NonZeroU32::MAX,
+                NonZeroU8::MAX,
+                usize::MAX
+            ),
+            Err(InvalidLenError::Overflow(OverflowBufferLenError {
+                width: NonZeroU32::MAX,
+                height: NonZeroU32::MAX,
+                pixel_elements: NonZeroU8::MAX
+            }))
+        );
+    }
+
+    #[test]
+    fn ensure_valid_len() {
+        let two = NonZeroU32::new(2).unwrap();
+        let three = NonZeroU32::new(3).unwrap();
+        assert_eq!(
+            DynamicImageChannelView::ensure_valid_len(two, three, 6),
+            Ok(())
+        );
+        assert_eq!(
+            DynamicImageChannelView::ensure_valid_len(two, three, 18),
+            Err(InvalidLenError::BufferMismatch)
+        );
+        // `width * height` fits `u64`, but can overflow a smaller `usize` (on 64-bit targets,
+        // where it fits, the buffer length mismatches instead)
+        let expected = if cfg!(target_pointer_width = "64") {
+            InvalidLenError::BufferMismatch
+        } else {
+            InvalidLenError::Overflow(OverflowBufferLenError {
+                width: NonZeroU32::MAX,
+                height: NonZeroU32::MAX,
+                pixel_elements: NonZeroU8::MAX,
+            })
+        };
+        assert_eq!(
+            DynamicImageChannelView::ensure_valid_len(NonZeroU32::MAX, NonZeroU32::MAX, usize::MAX),
+            Err(expected)
+        );
+    }
 
     #[test]
     fn image_with_other_dimensions_is_not_uniform() {
@@ -694,12 +870,8 @@ mod tests {
 
     #[test]
     fn buffer_flat_checks_primitive_size() {
-        let channel = DynamicImageChannel::new_vec(
-            vec![1u16, 2],
-            NonZeroU32::MIN,
-            NonZeroU32::MIN,
-            const { NonZeroU8::new(2).unwrap() },
-        );
+        let channel =
+            DynamicImageChannel::new_vec(vec![[1u16, 2]], NonZeroU32::MIN, NonZeroU32::MIN);
         assert_eq!(channel.primitive_size().get(), 2);
         assert_eq!(channel.len_flat(), 2);
         assert_eq!(channel.buffer_flat::<u16>(), Some(&[1, 2][..]));
@@ -840,6 +1012,10 @@ mod tests {
         assert_eq!(1, dynamic.channels.len());
         assert_eq!(1, dynamic[0].primitive_size().get());
         assert_eq!(3, dynamic[0].pixel_elements().get());
+        assert_eq!(
+            Some([[1u8, 2, 3]].as_slice()),
+            dynamic[0].buffer::<[u8; 3]>()
+        );
         let rgb_back: Image<[u8; 3], 1> = dynamic.try_into().unwrap();
         assert_eq!(rgb_back.into_vec(), vec![[1u8, 2, 3]]);
     }

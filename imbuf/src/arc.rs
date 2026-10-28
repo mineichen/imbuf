@@ -7,27 +7,32 @@ use std::{
 
 use crate::{
     DynamicImageChannel, DynamicImageChannelView, PixelTypePrimitive,
-    channel::{ChannelFactory, ImageChannelVTable, calc_pixel_len_flat, primitive_size},
+    channel::{ChannelFactory, ImageChannelVTable, primitive_size},
 };
 
 struct ArcFactory;
 
 impl DynamicImageChannel {
-    /// In contrast to the public constructors, `T` doesn't have to be `Pod`. Don't expose the
-    /// result as `DynamicImageChannel`, unless `T` is `Pod`
-    ///
-    /// # Panics
-    /// Panics if the buffer size is not compatible with the width, height and `pixel_elements`.
-    pub(crate) fn from_arc<T: PixelTypePrimitive>(
+    /// #Safety
+    /// In contrast to the public constructors, `T` doesn't have to be `Pod`.
+    /// This is only ok, if the DynamicImageChannel lives inside a ImageChannel, where it cannot be extracted.
+    /// `DynamicImageChannel` themself may never have !Pod primitives, because upcasting just occurs based on size/alignment
+    /// You could easily transform Image<NonZeroU8> into a DynamicImage and turn it into `Image<u8>` and modify it.
+    /// The drop function, which assumes `NonZeroU8` could get Zero values, which is UB.
+    /// Furthermore, width/height/pixel_elements are not checked against the input len
+
+    pub unsafe fn from_arc_flat_unchecked<T: PixelTypePrimitive>(
         input: Arc<[T]>,
         width: NonZeroU32,
         height: NonZeroU32,
         pixel_elements: NonZeroU8,
     ) -> Self {
         let len = input.len();
-        assert_eq!(
-            len,
-            calc_pixel_len_flat(width, height, pixel_elements),
+        // Panic, if the multiplication of the dimensions overflows or the length mismatches,
+        // instead of comparing against a wrapped value
+        debug_assert_eq!(
+            DynamicImageChannelView::ensure_valid_flat_len(width, height, pixel_elements, len),
+            Ok(()),
             "Incompatible Buffer-Size"
         );
 
@@ -70,7 +75,14 @@ impl<T: PixelTypePrimitive> ChannelFactory<T> for ArcFactory {
                 // The borrowed `Arc` view is dropped without releasing its share, as
                 // `ManuallyDrop` doesn't run `Drop`. The assignment below drops the old channel
                 // via its vtable, which releases the share instead.
-                *image = DynamicImageChannel::from_arc(new_data, width, height, pixel_elements);
+                *image = unsafe {
+                    DynamicImageChannel::from_arc_flat_unchecked(
+                        new_data,
+                        width,
+                        height,
+                        pixel_elements,
+                    )
+                };
             }
         }
         unsafe extern "C-unwind" fn clear_arc_channel<T>(image: &mut DynamicImageChannelView<'_>) {
@@ -80,13 +92,14 @@ impl<T: PixelTypePrimitive> ChannelFactory<T> for ArcFactory {
         unsafe extern "C-unwind" fn clone_arc_channel<'a, T: PixelTypePrimitive>(
             image: &DynamicImageChannelView<'a>,
         ) -> DynamicImageChannelView<'a> {
-            let arc = unsafe { arc_view::<T>(image) };
-            DynamicImageChannel::from_arc(
-                Arc::clone(&arc),
-                image.width(),
-                image.height(),
-                image.pixel_elements(),
-            )
+            unsafe {
+                DynamicImageChannel::from_arc_flat_unchecked(
+                    Arc::clone(&arc_view::<T>(image)),
+                    image.width(),
+                    image.height(),
+                    image.pixel_elements(),
+                )
+            }
         }
 
         &ImageChannelVTable {
@@ -101,11 +114,13 @@ impl<T: PixelTypePrimitive> ChannelFactory<T> for ArcFactory {
 pub(crate) unsafe extern "C-unwind" fn clone_slice_into_arc_channel<'a, T: PixelTypePrimitive>(
     image: &DynamicImageChannelView<'a>,
 ) -> DynamicImageChannelView<'a> {
-    DynamicImageChannel::from_arc(
-        // Safety: The vtable is built for T
-        Arc::from(unsafe { image.buffer_flat_unchecked::<T>() }),
-        image.width(),
-        image.height(),
-        image.pixel_elements(),
-    )
+    unsafe {
+        DynamicImageChannel::from_arc_flat_unchecked(
+            // Safety: The vtable is built for T
+            Arc::from(image.buffer_flat_unchecked::<T>()),
+            image.width(),
+            image.height(),
+            image.pixel_elements(),
+        )
+    }
 }

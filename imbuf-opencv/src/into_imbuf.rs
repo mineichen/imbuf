@@ -257,8 +257,15 @@ fn copied_channel<P: PixelTypePrimitive + Pod>(
     image: &DynamicImageChannelView<'_>,
 ) -> DynamicImageChannel {
     // Safety: The vtable is built for P
-    let data = unsafe { image.buffer_flat_unchecked::<P>() }.to_vec();
-    DynamicImageChannel::new_vec(data, image.width(), image.height(), image.pixel_elements())
+    let data = unsafe { image.buffer_flat_unchecked::<P>() }.into();
+    unsafe {
+        DynamicImageChannel::from_arc_flat_unchecked(
+            data,
+            image.width(),
+            image.height(),
+            image.pixel_elements(),
+        )
+    }
 }
 
 fn nonzero_dimension(value: i32) -> opencv::Result<NonZeroU32> {

@@ -2,7 +2,7 @@
 
 # This crate provides flexible image buffers
 
-- Allows transforming known [`Images`](GenericImage) (e.g. RGB32F) to typeless [`DynamicImages`](DynamicImage) and back (without a single buffer copy)
+- Allows transforming known [`Images`](ImageView) (e.g. RGB32F) to typeless [`DynamicImages`](DynamicImage) and back (without a single buffer copy)
 - Ability to support buffers from other libraries like "opencv" without copying buffers
 - Copy on write capability, so buffers can be reused if the internal representation allows it
 - FFI compatible

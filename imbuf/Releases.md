@@ -15,15 +15,17 @@
   - `PartialEq` compares the bytes of the buffers (e.g. `NaN == NaN`, but `0.0 != -0.0` for `f32` channels).
   - `DynamicImage::is_uniform` compares the primitive size instead of the primitive type.
 - Breaking: Remove `DynamicSize`, `RuntimePixelType` and `ImageChannel<DynamicSize<_>>`. Use `DynamicImageChannel` instead (e.g. `DynamicImageChannel::new_vec` instead of `ImageChannel::new_vec_dynamic`).
-- Breaking: Rename `Image::buffer_flat_mut` to `make_mut_flat` and `ImageChannel::primitive_make_mut` to `make_mut_flat`  to rise awareness of allocation and use same terminology
+- Breaking: Rename `Image::buffer_flat_mut` to `make_mut_flat` and `ImageChannel::primitive_make_mut` to `make_mut_flat` to rise awareness of allocation and use same terminology
 - Breaking: Conversions between `ImageChannel<TP>`/`Image<TP, N>` and `DynamicImageChannel`/`DynamicImage` require `TP::Primitive: bytemuck::Pod`.
 - Breaking: `PixelTypePrimitive` is no longer sealed and has no methods, so custom primitives can be used. Primitives which are not `Pod` (e.g. a wrapper around `NonZeroU8`) work with `Image` and `ImageChannel`, but can't be converted into a `DynamicImage`. Zero sized primitives are rejected at compile time.
 - Breaking: `PixelType` is sealed (primitives and arrays of primitives) and contains `Primitive` directly.
 - Breaking: `ImageChannelVTable` isn't generic anymore (`ptr: *const u8`).
-  - The vtable functions receive a `DynamicImageChannel` and use the `"C-unwind"` ABI, so panics propagate instead of aborting.
+  - The vtable functions use the `"C-unwind"` ABI, so panics propagate instead of aborting.
   - Add `ImageChannelVTable::primitive_size`.
 - Breaking: Remove `UnsafeImageChannel`; add `unsafe DynamicImageChannelView::from_raw_parts`, which documents the invariants of a channel, and `raw_ptr`/`raw_data`/`raw_vtable` to access the raw parts, e.g. when implementing a vtable. `make_mut` implementations mutate a channel by assigning a new one (the old channel is dropped via its vtable).
   - Remove `UnsafeImageChannel::new_vec` and `UnsafeImageChannel::new_arc`. Use `DynamicImageChannel::new_vec` or `ImageChannel::new_vec`/`new_arc` instead.
+- Add `DynamicImageChannelView::ensure_valid_flat_len(width, height, pixel_elements, buffer_len) -> Result<(), InvalidLenError>`, which checks that `width * height * pixel_elements` matches `buffer_len` and doesn't overflow `usize` (`InvalidLenError`: `LenOverflow` or `BufferMismatch`), and `ensure_valid_len(width, height, buffer_len)` beside it, which checks `width * height` for buffers, which store one element per pixel. Use them to validate untrusted dimensions, e.g. before `DynamicImageChannelView::from_raw_parts`. In debug builds, `from_raw_parts` asserts that the calculation of the buffer size doesn't overflow.
+- Fix: All constructors panic on overflowing dimension multiplications or sums, instead of comparing the buffer size against a wrapped value (e.g. `new_slice` could accept wrapped dimensions and create a channel, which reads out of bounds).
 - Breaking: `ImageChannel::buffer`, `ImageChannel::buffer_flat` and `ImageChannel::buffer_flat_bytes` are no longer `const`. `ImageChannel::buffer_flat_bytes` requires `TP::Primitive: bytemuck::NoUninit`.
 - Breaking: Remove the deprecated `external` module and the `image_0_25` feature. Use the `imbuf-image` crate instead.
 - Breaking: Remove deprecated `RgbImageInterleaved`, `LumaImage`, `RgbaImageInterleaved`, `RgbImagePlanar` and `RgbaImagePlanar`

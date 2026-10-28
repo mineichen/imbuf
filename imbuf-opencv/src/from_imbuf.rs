@@ -470,12 +470,8 @@ mod tests {
         unsafe impl bytemuck::Pod for F64 {}
         impl PixelTypePrimitive for F64 {}
 
-        let mut channel = DynamicImageChannel::new_vec(
-            vec![F64(1.)],
-            NonZeroU32::MIN,
-            NonZeroU32::MIN,
-            NonZeroU8::MIN,
-        );
+        let mut channel =
+            DynamicImageChannel::new_vec(vec![F64(1.)], NonZeroU32::MIN, NonZeroU32::MIN);
 
         let error = channel.as_opencv().unwrap_err();
         assert_eq!(error.code_as_enum(), Some(Code::StsUnsupportedFormat));

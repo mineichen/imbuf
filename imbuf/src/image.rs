@@ -5,8 +5,8 @@ use std::{
 };
 
 use crate::{
-    IncompatibleImageError,
-    channel::{ImageChannel, ImageChannelView, calc_pixel_len_flat},
+    DynamicImageChannelView, IncompatibleImageError,
+    channel::{ImageChannel, ImageChannelView},
     dynamic::IncompatibleImageErrorReason,
     pixel::{PixelType, PixelTypePrimitive},
     unwrap_usize_to_nonzero_u8,
@@ -59,17 +59,20 @@ impl<const CHANNELS: usize, T: PixelType> Image<T, CHANNELS> {
     /// # Panics
     /// Panics if the buffer size is not compatible with the width and height.
     #[must_use]
-    pub fn new_vec(mut input: Vec<T>, width: NonZeroU32, height: NonZeroU32) -> Self
+    pub fn new_vec(input: Vec<T>, width: NonZeroU32, height: NonZeroU32) -> Self
     where
         T: Clone,
     {
+        // Panic, if the multiplication of the dimensions overflows or the length mismatches,
+        // instead of comparing against a wrapped value
         assert_eq!(
-            input.len(),
-            calc_pixel_len_flat(
+            DynamicImageChannelView::ensure_valid_flat_len(
                 width,
                 height,
-                const { unwrap_usize_to_nonzero_u8(CHANNELS) }
+                const { unwrap_usize_to_nonzero_u8(CHANNELS) },
+                input.len()
             ),
+            Ok(()),
             "Incompatible Buffer-Size"
         );
 
@@ -81,13 +84,9 @@ impl<const CHANNELS: usize, T: PixelType> Image<T, CHANNELS> {
                 Self(arr.assume_init())
             }
         } else {
-            let ptr = input.as_mut_ptr().cast::<T::Primitive>();
-            let len = input.len() * T::ELEMENTS.get() as usize;
-            let cap = input.capacity() * T::ELEMENTS.get() as usize;
-            std::mem::forget(input);
-            let cast_input = unsafe { Vec::from_raw_parts(ptr, len, cap) };
+            let flat_input = crate::pixel::flat_vec(input);
             Self(crate::shared_vec::create_shared_channels(
-                cast_input,
+                flat_input,
                 [(width, height); CHANNELS],
             ))
         }
@@ -109,27 +108,32 @@ impl<const CHANNELS: usize, T: PixelType> Image<T, CHANNELS> {
     where
         T: Copy,
     {
-        let len = width.get() as usize * height.get() as usize;
         if CHANNELS == 1 {
             return Self::new_vec(v.to_vec(), width, height);
         }
 
+        // Panic, if the multiplication of the dimensions overflows or the length mismatches,
+        // instead of comparing against a wrapped value
         assert_eq!(
-            v.len(),
-            calc_pixel_len_flat(
+            DynamicImageChannelView::ensure_valid_flat_len(
                 width,
                 height,
-                const { unwrap_usize_to_nonzero_u8(CHANNELS) }
+                const { unwrap_usize_to_nonzero_u8(CHANNELS) },
+                v.len()
             ),
+            Ok(()),
             "Incompatible Buffer-Size"
         );
 
-        let mut write_buf_container = vec![std::mem::MaybeUninit::<T>::uninit(); len * CHANNELS];
+        // Todo: Change interleaved to planar should be done inline instead of new vec
+        let mut write_buf_container = vec![std::mem::MaybeUninit::<T>::uninit(); v.len()];
 
         let mut next_read = 0;
 
-        let area = (width.get() * height.get()) as usize;
-        let write_offsets: [_; CHANNELS] = std::array::from_fn(|i| i * area);
+        // The buffer length is checked above to be `width * height * CHANNELS`, so the division
+        // is exact and `i * len` cannot overflow
+        let len = v.len() / CHANNELS;
+        let write_offsets: [_; CHANNELS] = std::array::from_fn(|i| i * len);
 
         for pixel in 0..len {
             for (i, write_offset) in write_offsets.iter().enumerate() {
@@ -181,12 +185,19 @@ impl<'a, T: PixelType, const CHANNELS: usize> ImageView<'a, T, CHANNELS> {
     }
 
     fn slice_chunk_len(len: usize, width: NonZeroU32, height: NonZeroU32) -> usize {
-        let channels = const { unwrap_usize_to_nonzero_u8(CHANNELS) };
+        // Panic, if the multiplication of the dimensions overflows or the length mismatches,
+        // instead of comparing against a wrapped value
         assert_eq!(
-            len,
-            calc_pixel_len_flat(width, height, channels),
+            DynamicImageChannelView::ensure_valid_flat_len(
+                width,
+                height,
+                const { unwrap_usize_to_nonzero_u8(CHANNELS) },
+                len
+            ),
+            Ok(()),
             "Incompatible Buffer-Size"
         );
+        // The length is checked above to be `width * height * CHANNELS`, so the division is exact
         len / CHANNELS
     }
 
@@ -345,8 +356,7 @@ impl<const PIXEL_ELEMENTS: usize, T: PixelTypePrimitive> Image<[T; PIXEL_ELEMENT
         T: Copy,
     {
         if CHANNELS == 1 {
-            let len = width.get() as usize * height.get() as usize;
-            let mut data_vec = Vec::with_capacity(len);
+            let mut data_vec = Vec::with_capacity(channels[0].len());
             for &val in channels[0] {
                 data_vec.push([val; PIXEL_ELEMENTS]);
             }
@@ -362,25 +372,33 @@ impl<const PIXEL_ELEMENTS: usize, T: PixelTypePrimitive> Image<[T; PIXEL_ELEMENT
             };
         }
 
-        assert_eq!(
-            {
-                let mut len_iter = channels.iter().map(|c| c.len());
-                let first_len = len_iter.next().unwrap();
+        let mut len_iter = channels.iter().map(|c| c.len());
+        let first_len = len_iter.next().unwrap();
 
-                len_iter.fold(first_len, |acc, c| {
-                    assert_eq!(c, first_len, "All channels must have the same length");
-                    acc + c
-                })
-            },
-            calc_pixel_len_flat(
+        // Panic, if the sum overflows, instead of comparing against a wrapped value
+        let total = len_iter
+            .try_fold(first_len, |acc, len| {
+                assert_eq!(len, first_len, "All channels must have the same length");
+                acc.checked_add(len)
+            })
+            .expect("The buffer length overflows usize");
+
+        // Panic, if the multiplication of the dimensions overflows or the length mismatches,
+        // instead of comparing against a wrapped value
+        assert_eq!(
+            DynamicImageChannelView::ensure_valid_flat_len(
                 width,
                 height,
-                const { unwrap_usize_to_nonzero_u8(CHANNELS) }
+                const { unwrap_usize_to_nonzero_u8(CHANNELS) },
+                total
             ),
+            Ok(()),
             "Incompatible Buffer-Size"
         );
 
-        let len = width.get() as usize * height.get() as usize;
+        // All channels have the same length and their sum is checked above to be
+        // `width * height * CHANNELS`, so each channel is `width * height` long
+        let len = first_len;
         let mut channel_iters = channels.map(|c| c.iter());
 
         let mut data_vec = vec![std::mem::MaybeUninit::<[T; PIXEL_ELEMENTS]>::uninit(); len];
