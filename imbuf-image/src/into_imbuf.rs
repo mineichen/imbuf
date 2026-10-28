@@ -41,7 +41,8 @@ pub trait ImageIntoImbuf {
     ) -> Result<imbuf::Image<TP, CHANNELS>, String>
     where
         TP: imbuf::PixelType,
-        imbuf::Image<TP, CHANNELS>: TryFrom<imbuf::DynamicImage, Error: std::fmt::Display>;
+        imbuf::Image<TP, CHANNELS>:
+            TryFrom<imbuf::DynamicImage, Error = imbuf::IncompatibleImage<imbuf::DynamicImage>>;
 }
 
 impl ImageIntoImbuf for image::DynamicImage {
@@ -69,58 +70,70 @@ impl ImageIntoImbuf for image::DynamicImage {
         };
         Ok(match self {
             image::DynamicImage::ImageLuma8(x) => {
-                Image::<u8, 1>::new_vec(extract_vec(x, width_times_height)?, width, height).into()
+                Image::<u8, 1>::new_vec(extract_vec(x, width_times_height)?, width, height)
+                    .expect(LEN_CHECKED)
+                    .into()
             }
             image::DynamicImage::ImageLuma16(x) => {
-                Image::<u16, 1>::new_vec(extract_vec(x, width_times_height)?, width, height).into()
+                Image::<u16, 1>::new_vec(extract_vec(x, width_times_height)?, width, height)
+                    .expect(LEN_CHECKED)
+                    .into()
             }
             image::DynamicImage::ImageLumaA8(x) => Image::<[u8; 2], 1>::new_vec_flat(
                 extract_vec(x, width_times_height)?,
                 width,
                 height,
             )
+            .expect(LEN_CHECKED)
             .into(),
             image::DynamicImage::ImageLumaA16(x) => Image::<[u16; 2], 1>::new_vec_flat(
                 extract_vec(x, width_times_height)?,
                 width,
                 height,
             )
+            .expect(LEN_CHECKED)
             .into(),
             image::DynamicImage::ImageRgb8(x) => Image::<[u8; 3], 1>::new_vec_flat(
                 extract_vec(x, width_times_height)?,
                 width,
                 height,
             )
+            .expect(LEN_CHECKED)
             .into(),
             image::DynamicImage::ImageRgb16(x) => Image::<[u16; 3], 1>::new_vec_flat(
                 extract_vec(x, width_times_height)?,
                 width,
                 height,
             )
+            .expect(LEN_CHECKED)
             .into(),
             image::DynamicImage::ImageRgb32F(x) => Image::<[f32; 3], 1>::new_vec_flat(
                 extract_vec(x, width_times_height)?,
                 width,
                 height,
             )
+            .expect(LEN_CHECKED)
             .into(),
             image::DynamicImage::ImageRgba8(x) => Image::<[u8; 4], 1>::new_vec_flat(
                 extract_vec(x, width_times_height)?,
                 width,
                 height,
             )
+            .expect(LEN_CHECKED)
             .into(),
             image::DynamicImage::ImageRgba16(x) => Image::<[u16; 4], 1>::new_vec_flat(
                 extract_vec(x, width_times_height)?,
                 width,
                 height,
             )
+            .expect(LEN_CHECKED)
             .into(),
             image::DynamicImage::ImageRgba32F(x) => Image::<[f32; 4], 1>::new_vec_flat(
                 extract_vec(x, width_times_height)?,
                 width,
                 height,
             )
+            .expect(LEN_CHECKED)
             .into(),
             _ => {
                 return Err(IntoImbufError {
@@ -136,13 +149,17 @@ impl ImageIntoImbuf for image::DynamicImage {
     ) -> Result<imbuf::Image<TP, CHANNELS>, String>
     where
         TP: imbuf::PixelType,
-        imbuf::Image<TP, CHANNELS>: TryFrom<imbuf::DynamicImage, Error: std::fmt::Display>,
+        imbuf::Image<TP, CHANNELS>:
+            TryFrom<imbuf::DynamicImage, Error = imbuf::IncompatibleImage<imbuf::DynamicImage>>,
     {
         let dynamic = self.into_imbuf_dynamic().map_err(|e| e.to_string())?;
         imbuf::Image::try_from(dynamic).map_err(|e| e.to_string())
     }
 }
 
+const LEN_CHECKED: &str = "The length is checked by extract_vec";
+
+/// Fails, if the length of the buffer doesn't match the dimensions
 fn extract_vec<TPixel: image::Pixel>(
     image: ImageBuffer<TPixel, Vec<TPixel::Subpixel>>,
     width_times_height: usize,

@@ -1,3 +1,4 @@
+use assert_matches::assert_matches;
 use std::{
     num::{NonZeroU8, NonZeroU32, NonZeroUsize},
     panic::{AssertUnwindSafe, catch_unwind},
@@ -7,9 +8,13 @@ use imbuf::{
     DynamicImage, DynamicImageChannel, DynamicImageChannelView, Image, ImageChannel,
     ImageChannelVTable, PixelTypePrimitive,
 };
+use testresult::TestResult;
 
-const ONE: NonZeroU32 = NonZeroU32::MIN;
-const TWO: NonZeroU32 = NonZeroU32::new(2).unwrap();
+const NZ_1: NonZeroU32 = NonZeroU32::MIN;
+const NZ_2: NonZeroU32 = NonZeroU32::new(2).unwrap();
+const NZ_U8_1: NonZeroU8 = NonZeroU8::MIN;
+const NZ_U8_2: NonZeroU8 = NonZeroU8::new(2).unwrap();
+const NZ_USIZE_4: NonZeroUsize = NonZeroUsize::new(4).unwrap();
 
 /// Pod primitive with the same size as `u8`
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -33,38 +38,40 @@ struct NonZero(NonZeroU8);
 impl PixelTypePrimitive for NonZero {}
 
 #[test]
-fn pod_primitive_round_trips_through_dynamic_image() {
+fn pod_primitive_round_trips_through_dynamic_image() -> TestResult {
     let image =
-        Image::<[Gray; 2], 1>::new_vec(vec![[Gray(1), Gray(2)], [Gray(3), Gray(4)]], TWO, ONE);
+        Image::<[Gray; 2], 1>::new_vec(vec![[Gray(1), Gray(2)], [Gray(3), Gray(4)]], NZ_2, NZ_1)?;
     let data_ptr = image.buffer().as_ptr() as usize;
     let expected = image.clone();
     let dynamic = DynamicImage::from(image);
-    assert_eq!(dynamic.first().primitive_size().get(), 1);
+    assert_eq!(dynamic.first().bytes_per_primitive().get(), 1);
 
-    let back = Image::<[Gray; 2], 1>::try_from(dynamic).unwrap();
+    let back = Image::<[Gray; 2], 1>::try_from(dynamic)?;
     assert_eq!(back, expected);
     assert_eq!(back.buffer().as_ptr() as usize, data_ptr);
+    Ok(())
 }
 
 #[test]
-fn pod_primitive_can_be_viewed_as_other_primitive_of_same_size() {
-    let channel = ImageChannel::<Gray>::new_vec(vec![Gray(1), Gray(2)], TWO, ONE);
+fn pod_primitive_can_be_viewed_as_other_primitive_of_same_size() -> TestResult {
+    let channel = ImageChannel::<Gray>::new_vec(vec![Gray(1), Gray(2)], NZ_2, NZ_1)?;
     let data_ptr = channel.buffer().as_ptr() as usize;
     let mut dynamic = DynamicImageChannel::from(channel);
 
-    assert_eq!(dynamic.buffer_flat::<u8>(), Some(&[1, 2][..]));
-    dynamic.make_mut_flat::<u8>().unwrap()[0] = 3;
+    assert_eq!(dynamic.buffer_flat::<u8>(), Ok(&[1, 2][..]));
+    dynamic.make_mut_flat::<u8>()?[0] = 3;
 
-    let as_u8 = ImageChannel::<u8>::try_from(dynamic).unwrap();
+    let as_u8 = ImageChannel::<u8>::try_from(dynamic)?;
     assert_eq!(as_u8.buffer(), &[3, 2]);
     assert_eq!(as_u8.buffer().as_ptr() as usize, data_ptr);
+    Ok(())
 }
 
 #[test]
-fn non_pod_primitive_works_with_typed_images() {
-    let one = NonZero(NonZeroU8::MIN);
-    let two = NonZero(NonZeroU8::new(2).unwrap());
-    let mut image = Image::<NonZero, 2>::new_vec(vec![one, two, two, one], TWO, ONE);
+fn non_pod_primitive_works_with_typed_images() -> TestResult {
+    let one = NonZero(NZ_U8_1);
+    let two = NonZero(NZ_U8_2);
+    let mut image = Image::<NonZero, 2>::new_vec(vec![one, two, two, one], NZ_2, NZ_1)?;
     let clone = image.clone();
 
     let [first, _] = image.make_mut();
@@ -74,8 +81,9 @@ fn non_pod_primitive_works_with_typed_images() {
     assert_eq!(clone.buffers(), [&[one, two][..], &[two, one][..]]);
     assert_eq!(clone.into_vec(), vec![one, two, two, one]);
 
-    let channel = ImageChannel::<[NonZero; 2]>::new_arc(vec![[one, two]].into(), ONE, ONE);
+    let channel = ImageChannel::<[NonZero; 2]>::new_arc(vec![[one, two]].into(), NZ_1, NZ_1)?;
     assert_eq!(channel.clone().into_vec(), vec![[one, two]]);
+    Ok(())
 }
 
 #[repr(C, align(4))]
@@ -92,14 +100,14 @@ unsafe extern "C-unwind" fn panicking_make_mut(_: &mut DynamicImageChannelView<'
 }
 unsafe extern "C-unwind" fn noop_drop(_: &mut DynamicImageChannelView<'_>) {}
 extern "C-unwind" fn four_bytes() -> NonZeroUsize {
-    NonZeroUsize::new(4).unwrap()
+    NZ_USIZE_4
 }
 
 static STATIC_VTABLE: ImageChannelVTable = ImageChannelVTable {
     clone: panicking_clone,
     make_mut: panicking_make_mut,
     drop: noop_drop,
-    primitive_size: four_bytes,
+    bytes_per_primitive: four_bytes,
 };
 
 /// One `Rgba8` pixel, which starts at an address which is not aligned for `f32`
@@ -109,9 +117,9 @@ fn misaligned_channel() -> DynamicImageChannel {
     unsafe {
         DynamicImageChannel::from_raw_parts(
             ptr,
-            ONE,
-            ONE,
-            NonZeroU8::MIN,
+            NZ_1,
+            NZ_1,
+            NZ_U8_1,
             &STATIC_VTABLE,
             std::ptr::null_mut(),
         )
@@ -123,22 +131,22 @@ fn misaligned_buffer_is_rejected() {
     let channel = misaligned_channel();
     assert_eq!(
         channel.buffer_flat::<Rgba8>(),
-        Some(&[Rgba8([1, 2, 3, 4])][..])
+        Ok(&[Rgba8([1, 2, 3, 4])][..])
     );
     assert_eq!(channel.buffer_flat_bytes(), &[1, 2, 3, 4]);
-    assert_eq!(channel.buffer_flat::<f32>(), None);
-    assert!(channel.try_cast::<f32>().is_none());
-    assert!(ImageChannel::<f32>::try_from(channel).is_err());
+    assert_matches!(channel.buffer_flat::<f32>(), Err(_));
+    assert_matches!(channel.try_cast::<f32>(), Err(_));
+    assert_matches!(ImageChannel::<f32>::try_from(channel), Err(_));
 }
 
 #[test]
 fn panics_in_vtable_propagate() {
     let mut channel = misaligned_channel();
-    assert!(catch_unwind(AssertUnwindSafe(|| channel.clone())).is_err());
-    assert!(
+    assert_matches!(catch_unwind(AssertUnwindSafe(|| channel.clone())), Err(_));
+    assert_matches!(
         catch_unwind(AssertUnwindSafe(|| channel
             .make_mut_flat::<Rgba8>()
-            .is_some()))
-        .is_err()
+            .is_ok())),
+        Err(_)
     );
 }

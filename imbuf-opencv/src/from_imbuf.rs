@@ -5,8 +5,8 @@ use std::{
 
 use bytemuck::Pod;
 use imbuf::{
-    DynamicImageChannelView, DynamicImageView, ImageChannelView, ImageView, PixelType,
-    PixelTypePrimitive,
+    DynamicImageChannelView, DynamicImageView, ImageChannelView, ImageView,
+    IncompatibleChannelError, PixelType, PixelTypePrimitive,
 };
 use opencv::{
     boxed_ref::{BoxedRef, BoxedRefMut},
@@ -19,7 +19,7 @@ const U8_SIZE: usize = size_of::<u8>();
 const U16_SIZE: usize = size_of::<u16>();
 const F32_SIZE: usize = size_of::<f32>();
 
-/// Borrows an [`imbuf`] buffer as an OpenCV [`Mat`] view without copying.
+/// Borrows an [`imbuf`] buffer as an `OpenCV` [`Mat`] view without copying.
 ///
 /// The `Mat` points at the `imbuf` allocation and is invalidated by the borrow
 /// of the source. No owned conversion is provided in this direction: a `Mat`
@@ -32,7 +32,7 @@ pub trait ImbufAsOpencv {
     fn as_opencv(&self) -> opencv::Result<BoxedRef<'_, Mat>>;
 }
 pub trait ImbufAsOpencvMut: ImbufAsOpencv {
-    /// Mutably borrows the buffer as an OpenCV [`Mat`] view without copying.
+    /// Mutably borrows the buffer as an `OpenCV` [`Mat`] view without copying.
     ///
     /// Writes through the returned `Mat` land in the `imbuf` buffer.
     ///
@@ -69,9 +69,13 @@ fn unsupported_primitive(channel: &DynamicImageChannelView<'_>) -> opencv::Error
         Code::StsUnsupportedFormat.into(),
         format!(
             "unsupported format: primitives must have 1, 2 or 4 bytes and be aligned, got {} bytes",
-            channel.primitive_size()
+            channel.bytes_per_primitive()
         ),
     )
+}
+
+fn incompatible_primitive(error: &IncompatibleChannelError) -> opencv::Error {
+    opencv::Error::new(Code::StsUnsupportedFormat.into(), error.to_string())
 }
 
 impl ImbufAsOpencv for DynamicImageChannelView<'_> {
@@ -81,7 +85,7 @@ impl ImbufAsOpencv for DynamicImageChannelView<'_> {
         ) -> opencv::Result<BoxedRef<'b, Mat>> {
             let flat = channel
                 .buffer_flat::<P>()
-                .ok_or_else(|| unsupported_primitive(channel))?;
+                .map_err(|e| incompatible_primitive(&e))?;
             let ptr = flat.as_ptr().cast_mut().cast::<c_void>();
             let (dims, pixel_elements) = (channel.dimensions(), channel.pixel_elements());
             let mat =
@@ -89,7 +93,7 @@ impl ImbufAsOpencv for DynamicImageChannelView<'_> {
             Ok(BoxedRef::from(mat))
         }
 
-        match self.primitive_size().get() {
+        match self.bytes_per_primitive().get() {
             U8_SIZE => view::<u8>(self),
             U16_SIZE => view::<u16>(self),
             F32_SIZE => view::<f32>(self),
@@ -103,15 +107,16 @@ impl ImbufAsOpencvMut for DynamicImageChannelView<'_> {
             channel: &'b mut DynamicImageChannelView<'_>,
         ) -> opencv::Result<BoxedRefMut<'b, Mat>> {
             let (dims, pixel_elements) = (channel.dimensions(), channel.pixel_elements());
-            let error = unsupported_primitive(channel);
-            let flat = channel.make_mut_flat::<P>().ok_or(error)?;
+            let flat = channel
+                .make_mut_flat::<P>()
+                .map_err(|e| incompatible_primitive(&e))?;
             let ptr = flat.as_mut_ptr().cast::<c_void>();
             let mat =
                 unsafe { create_unrestricted_mat::<P>(dims, flat.len(), pixel_elements, ptr) }?;
             Ok(BoxedRefMut::from(mat))
         }
 
-        match self.primitive_size().get() {
+        match self.bytes_per_primitive().get() {
             U8_SIZE => view::<u8>(self),
             U16_SIZE => view::<u16>(self),
             F32_SIZE => view::<f32>(self),
@@ -211,137 +216,134 @@ unsafe fn create_unrestricted_mat<P: DataType>(
 
 #[cfg(test)]
 mod tests {
+    use assert_matches::assert_matches;
     use std::num::NonZeroU32;
 
     use imbuf::{DynamicImage, DynamicImageChannel, Image, PixelTypePrimitive};
     use opencv::core::{VecN, Vector};
     use opencv::prelude::{MatTraitConst, MatTraitConstManual, MatTraitManual};
+    use testresult::TestResult;
 
     use super::*;
 
+    const NZ_1: NonZeroU32 = NonZeroU32::MIN;
+    const NZ_2: NonZeroU32 = NonZeroU32::new(2).unwrap();
+    const NZ_3: NonZeroU32 = NonZeroU32::new(3).unwrap();
+
     fn imbuf_image_to_mat_preserves_dims_and_content<T>(
         pixels: Vec<T>,
-        decode_png_to_vec: impl Fn(&[u8]) -> Vec<T>,
-    ) where
+        decode_png_to_vec: impl Fn(&[u8]) -> TestResult<Vec<T>>,
+    ) -> TestResult
+    where
         T: PixelTypePrimitive + opencv::core::DataType + std::fmt::Debug + PartialEq + 'static,
     {
-        let width = NonZeroU32::new(3).unwrap();
-        let height = NonZeroU32::new(2).unwrap();
-        let img: Image<T, 1> = Image::new_vec(pixels, width, height);
+        let img: Image<T, 1> = Image::new_vec(pixels, NZ_3, NZ_2)?;
 
-        let borrowed = img.as_opencv().unwrap();
+        let borrowed = img.as_opencv()?;
         let mat = &borrowed;
 
-        assert_eq!(img.width(), width);
-        assert_eq!(img.height(), height);
-        assert_eq!(mat.rows(), height.get() as i32);
-        assert_eq!(mat.cols(), width.get() as i32);
+        assert_eq!(img.width(), NZ_3);
+        assert_eq!(img.height(), NZ_2);
+        assert_eq!(mat.cols(), 3);
+        assert_eq!(mat.rows(), 2);
 
-        let mat_data = mat.data_typed::<T>().unwrap();
+        let mat_data = mat.data_typed::<T>()?;
         assert_eq!(mat_data, img.buffer());
         assert_eq!(mat_data.as_ptr() as usize, img.buffer().as_ptr() as usize);
 
         // Encode the borrowed Mat as PNG, reload via the `image` crate, and compare decoded pixels
         // with the original image buffer.
         let mut png = Vector::<u8>::new();
-        opencv::imgcodecs::imencode(".png", mat, &mut png, &Vector::new()).unwrap();
-        let decoded = decode_png_to_vec(png.as_slice());
+        opencv::imgcodecs::imencode(".png", mat, &mut png, &Vector::new())?;
+        let decoded = decode_png_to_vec(png.as_slice())?;
         assert_eq!(decoded, img.buffer());
+        Ok(())
     }
 
     #[test]
-    fn imbuf_image_u8_to_mat_preserves_dims_and_content() {
+    fn imbuf_image_u8_to_mat_preserves_dims_and_content() -> TestResult {
         imbuf_image_to_mat_preserves_dims_and_content(vec![0u8, 1, 2, 3, 4, 5], |png| {
-            match image::load_from_memory_with_format(png, image::ImageFormat::Png).unwrap() {
-                image::DynamicImage::ImageLuma8(img) => img.into_vec(),
-                other => panic!("Expected Luma8 PNG, got {other:?}"),
+            match image::load_from_memory_with_format(png, image::ImageFormat::Png)? {
+                image::DynamicImage::ImageLuma8(img) => Ok(img.into_vec()),
+                other => Err(format!("Expected Luma8 PNG, got {other:?}").into()),
             }
-        });
+        })
     }
 
     #[test]
-    fn imbuf_image_u16_to_mat_preserves_dims_and_content() {
+    fn imbuf_image_u16_to_mat_preserves_dims_and_content() -> TestResult {
         imbuf_image_to_mat_preserves_dims_and_content(vec![10u16, 20, 30, 40, 50, 60], |png| {
-            match image::load_from_memory_with_format(png, image::ImageFormat::Png).unwrap() {
-                image::DynamicImage::ImageLuma16(img) => img.into_vec(),
-                other => panic!("Expected Luma16 PNG, got {other:?}"),
+            match image::load_from_memory_with_format(png, image::ImageFormat::Png)? {
+                image::DynamicImage::ImageLuma16(img) => Ok(img.into_vec()),
+                other => Err(format!("Expected Luma16 PNG, got {other:?}").into()),
             }
-        });
+        })
     }
 
     #[test]
-    fn as_opencv_mut_shares_buffer() {
-        let width = NonZeroU32::new(2).unwrap();
-        let height = NonZeroU32::new(1).unwrap();
-        let mut img: Image<u8, 1> = Image::new_vec(vec![1, 2], width, height);
+    fn as_opencv_mut_shares_buffer() -> TestResult {
+        let mut img: Image<u8, 1> = Image::new_vec(vec![1, 2], NZ_2, NZ_1)?;
         let data_ptr = img.buffer().as_ptr() as usize;
 
         {
-            let mut mat = img.as_opencv_mut().unwrap();
-            mat.data_typed_mut::<u8>().unwrap()[0] = 42;
+            let mut mat = img.as_opencv_mut()?;
+            mat.data_typed_mut::<u8>()?[0] = 42;
         }
 
         assert_eq!(img.buffer(), &[42, 2]);
         assert_eq!(img.buffer().as_ptr() as usize, data_ptr);
+        Ok(())
     }
 
     #[test]
-    fn as_opencv_shares_buffer_without_copying() {
-        let width = NonZeroU32::new(2).unwrap();
-        let height = NonZeroU32::new(1).unwrap();
-        let img: Image<u8, 1> = Image::new_vec(vec![1, 2], width, height);
+    fn as_opencv_shares_buffer_without_copying() -> TestResult {
+        let img: Image<u8, 1> = Image::new_vec(vec![1, 2], NZ_2, NZ_1)?;
         let data_ptr = img.buffer().as_ptr() as usize;
 
-        let owned_view = img.as_opencv().unwrap();
+        let owned_view = img.as_opencv()?;
         let owned_mat = &owned_view;
         assert_eq!(owned_mat.rows(), 1);
         assert_eq!(owned_mat.cols(), 2);
-        assert_eq!(
-            owned_mat.data_typed::<u8>().unwrap().as_ptr() as usize,
-            data_ptr
-        );
+        assert_eq!(owned_mat.data_typed::<u8>()?.as_ptr() as usize, data_ptr);
 
         let img_ref: &Image<u8, 1> = &img;
-        let borrowed_view = img_ref.as_opencv().unwrap();
+        let borrowed_view = img_ref.as_opencv()?;
         assert_eq!(
-            borrowed_view.data_typed::<u8>().unwrap().as_ptr() as usize,
+            borrowed_view.data_typed::<u8>()?.as_ptr() as usize,
             data_ptr
         );
+        Ok(())
     }
 
     #[test]
-    fn borrowed_image_as_opencv_mut_writes_into_slice() {
-        let width = NonZeroU32::new(2).unwrap();
-        let height = NonZeroU32::new(1).unwrap();
+    fn borrowed_image_as_opencv_mut_writes_into_slice() -> TestResult {
         let mut data = [1u8, 2];
         {
-            let mut img = ImageView::<u8, 1>::new_slice_mut(&mut data, width, height);
-            let mut mat = img.as_opencv_mut().unwrap();
-            mat.data_typed_mut::<u8>().unwrap()[1] = 42;
+            let mut img = ImageView::<u8, 1>::new_slice_mut(&mut data, NZ_2, NZ_1)?;
+            let mut mat = img.as_opencv_mut()?;
+            mat.data_typed_mut::<u8>()?[1] = 42;
         }
         assert_eq!(data, [1, 42]);
+        Ok(())
     }
 
     #[test]
-    fn as_opencv_works_through_mut_receiver() {
-        let width = NonZeroU32::new(2).unwrap();
-        let height = NonZeroU32::new(1).unwrap();
-        let mut img: Image<u8, 1> = Image::new_vec(vec![1, 2], width, height);
+    fn as_opencv_works_through_mut_receiver() -> TestResult {
+        let mut img: Image<u8, 1> = Image::new_vec(vec![1, 2], NZ_2, NZ_1)?;
         let data_ptr = img.buffer().as_ptr() as usize;
 
         let img_ref: &mut Image<u8, 1> = &mut img;
-        let view = img_ref.as_opencv().unwrap();
-        assert_eq!(view.data_typed::<u8>().unwrap().as_ptr() as usize, data_ptr);
+        let view = img_ref.as_opencv()?;
+        assert_eq!(view.data_typed::<u8>()?.as_ptr() as usize, data_ptr);
+        Ok(())
     }
 
     #[test]
-    fn interleaved_rgb_shares_buffer_as_cv_8uc3() {
-        let width = NonZeroU32::new(2).unwrap();
-        let height = NonZeroU32::new(1).unwrap();
-        let img: Image<[u8; 3], 1> = Image::new_vec(vec![[1u8, 2, 3], [4, 5, 6]], width, height);
+    fn interleaved_rgb_shares_buffer_as_cv_8uc3() -> TestResult {
+        let img: Image<[u8; 3], 1> = Image::new_vec(vec![[1u8, 2, 3], [4, 5, 6]], NZ_2, NZ_1)?;
         let data_ptr = img.buffer().as_ptr() as usize;
 
-        let borrowed = img.as_opencv().unwrap();
+        let borrowed = img.as_opencv()?;
         let mat = &borrowed;
 
         assert_eq!(mat.rows(), 1);
@@ -350,40 +352,34 @@ mod tests {
         assert_eq!(mat.typ(), opencv::core::CV_8UC3);
         assert_eq!(mat.data() as usize, data_ptr);
         assert_eq!(
-            mat.data_typed::<VecN<u8, 3>>().unwrap(),
+            mat.data_typed::<VecN<u8, 3>>()?,
             &[VecN([1, 2, 3]), VecN([4, 5, 6])]
         );
+        Ok(())
     }
 
     #[test]
-    fn interleaved_rgb_mut_writes_through_to_imbuf() {
-        let width = NonZeroU32::new(2).unwrap();
-        let height = NonZeroU32::new(1).unwrap();
-        let mut img: Image<[u8; 3], 1> =
-            Image::new_vec(vec![[1u8, 2, 3], [4, 5, 6]], width, height);
+    fn interleaved_rgb_mut_writes_through_to_imbuf() -> TestResult {
+        let mut img: Image<[u8; 3], 1> = Image::new_vec(vec![[1u8, 2, 3], [4, 5, 6]], NZ_2, NZ_1)?;
         let data_ptr = img.buffer().as_ptr() as usize;
 
         {
-            let mut mat = img.as_opencv_mut().unwrap();
-            mat.data_typed_mut::<VecN<u8, 3>>().unwrap()[0] = VecN([7, 8, 9]);
+            let mut mat = img.as_opencv_mut()?;
+            mat.data_typed_mut::<VecN<u8, 3>>()?[0] = VecN([7, 8, 9]);
         }
 
         assert_eq!(img.buffer(), &[[7, 8, 9], [4, 5, 6]]);
         assert_eq!(img.buffer().as_ptr() as usize, data_ptr);
+        Ok(())
     }
 
     #[test]
-    fn interleaved_pixels_with_more_than_four_channels() {
-        let width = NonZeroU32::new(2).unwrap();
-        let height = NonZeroU32::new(1).unwrap();
-        let mut img: Image<[u8; 6], 1> = Image::new_vec(
-            vec![[1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12]],
-            width,
-            height,
-        );
+    fn interleaved_pixels_with_more_than_four_channels() -> TestResult {
+        let mut img: Image<[u8; 6], 1> =
+            Image::new_vec(vec![[1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12]], NZ_2, NZ_1)?;
         let data_ptr = img.buffer().as_ptr() as usize;
 
-        let borrowed = img.as_opencv().unwrap();
+        let borrowed = img.as_opencv()?;
         let mat = &borrowed;
         assert_eq!(mat.rows(), 1);
         assert_eq!(mat.cols(), 2);
@@ -392,62 +388,50 @@ mod tests {
         assert_eq!(mat.data() as usize, data_ptr);
 
         {
-            let mut mat = img.as_opencv_mut().unwrap();
-            mat.data_typed_mut::<VecN<u8, 6>>().unwrap()[0] = VecN([9, 8, 7, 6, 5, 4]);
+            let mut mat = img.as_opencv_mut()?;
+            mat.data_typed_mut::<VecN<u8, 6>>()?[0] = VecN([9, 8, 7, 6, 5, 4]);
         }
         assert_eq!(img.buffer(), &[[9, 8, 7, 6, 5, 4], [7, 8, 9, 10, 11, 12]]);
         assert_eq!(img.buffer().as_ptr() as usize, data_ptr);
+        Ok(())
     }
 
     #[test]
-    fn dynamic_image_as_opencv_shares_buffer() {
-        let width = NonZeroU32::new(2).unwrap();
-        let height = NonZeroU32::new(1).unwrap();
-        let image: Image<u8, 1> = Image::new_vec(vec![1, 2], width, height);
+    fn dynamic_image_as_opencv_shares_buffer() -> TestResult {
+        let image: Image<u8, 1> = Image::new_vec(vec![1, 2], NZ_2, NZ_1)?;
         let data_ptr = image.buffer().as_ptr() as usize;
         let dynamic = DynamicImage::from(image);
 
-        let borrowed = dynamic.as_opencv().unwrap();
-        assert_eq!(
-            borrowed.data_typed::<u8>().unwrap().as_ptr() as usize,
-            data_ptr
-        );
+        let borrowed = dynamic.as_opencv()?;
+        assert_eq!(borrowed.data_typed::<u8>()?.as_ptr() as usize, data_ptr);
 
-        let channel = dynamic
-            .first()
-            .try_cast::<u8>()
-            .expect("Expected U8 channel");
+        let channel = dynamic.first().try_cast::<u8>()?;
         assert_eq!(channel.buffer_flat(), &[1, 2]);
+        Ok(())
     }
 
     #[test]
-    fn dynamic_image_as_opencv_mut_writes_through() {
-        let width = NonZeroU32::new(2).unwrap();
-        let height = NonZeroU32::new(1).unwrap();
-        let image: Image<u8, 1> = Image::new_vec(vec![1, 2], width, height);
+    fn dynamic_image_as_opencv_mut_writes_through() -> TestResult {
+        let image: Image<u8, 1> = Image::new_vec(vec![1, 2], NZ_2, NZ_1)?;
         let mut dynamic = DynamicImage::from(image);
 
         {
-            let mut mat = dynamic.as_opencv_mut().unwrap();
-            mat.data_typed_mut::<u8>().unwrap()[0] = 42;
+            let mut mat = dynamic.as_opencv_mut()?;
+            mat.data_typed_mut::<u8>()?[0] = 42;
         }
 
-        let channel = dynamic
-            .first()
-            .try_cast::<u8>()
-            .expect("Expected U8 channel");
+        let channel = dynamic.first().try_cast::<u8>()?;
         assert_eq!(channel.buffer_flat(), &[42, 2]);
+        Ok(())
     }
 
     #[test]
-    fn dynamic_image_with_interleaved_rgb_shares_buffer_as_cv_8uc3() {
-        let width = NonZeroU32::new(2).unwrap();
-        let height = NonZeroU32::new(1).unwrap();
-        let image: Image<[u8; 3], 1> = Image::new_vec(vec![[1u8, 2, 3], [4, 5, 6]], width, height);
+    fn dynamic_image_with_interleaved_rgb_shares_buffer_as_cv_8uc3() -> TestResult {
+        let image: Image<[u8; 3], 1> = Image::new_vec(vec![[1u8, 2, 3], [4, 5, 6]], NZ_2, NZ_1)?;
         let data_ptr = image.buffer().as_ptr() as usize;
         let dynamic = DynamicImage::from(image);
 
-        let borrowed = dynamic.as_opencv().unwrap();
+        let borrowed = dynamic.as_opencv()?;
         let mat = &borrowed;
 
         assert_eq!(mat.rows(), 1);
@@ -456,13 +440,14 @@ mod tests {
         assert_eq!(mat.typ(), opencv::core::CV_8UC3);
         assert_eq!(mat.data() as usize, data_ptr);
         assert_eq!(
-            mat.data_typed::<VecN<u8, 3>>().unwrap(),
+            mat.data_typed::<VecN<u8, 3>>()?,
             &[VecN([1, 2, 3]), VecN([4, 5, 6])]
         );
+        Ok(())
     }
 
     #[test]
-    fn dynamic_channel_with_unsupported_primitive_size_is_rejected() {
+    fn dynamic_channel_with_unsupported_bytes_per_primitive_is_rejected() -> TestResult {
         #[derive(Clone, Copy, PartialEq)]
         #[repr(transparent)]
         struct F64(f64);
@@ -470,12 +455,16 @@ mod tests {
         unsafe impl bytemuck::Pod for F64 {}
         impl PixelTypePrimitive for F64 {}
 
-        let mut channel =
-            DynamicImageChannel::new_vec(vec![F64(1.)], NonZeroU32::MIN, NonZeroU32::MIN);
+        let mut channel = DynamicImageChannel::new_vec(vec![F64(1.)], NZ_1, NZ_1)?;
 
-        let error = channel.as_opencv().unwrap_err();
-        assert_eq!(error.code_as_enum(), Some(Code::StsUnsupportedFormat));
-        let error = channel.as_opencv_mut().unwrap_err();
-        assert_eq!(error.code_as_enum(), Some(Code::StsUnsupportedFormat));
+        assert_matches!(
+            channel.as_opencv(),
+            Err(e) if e.code_as_enum() == Some(Code::StsUnsupportedFormat)
+        );
+        assert_matches!(
+            channel.as_opencv_mut(),
+            Err(e) if e.code_as_enum() == Some(Code::StsUnsupportedFormat)
+        );
+        Ok(())
     }
 }

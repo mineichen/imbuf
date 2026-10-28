@@ -1,11 +1,11 @@
 #![doc = include_str!("../README.md")]
-#![warn(clippy::pedantic)]
 
 use std::num::NonZeroU8;
 
 mod arc;
 mod channel;
 mod dynamic;
+mod error;
 mod image;
 mod pixel;
 mod shared_vec;
@@ -13,9 +13,10 @@ mod vec;
 mod view;
 
 pub use channel::{ImageChannel, ImageChannelVTable, ImageChannelView};
-pub use dynamic::{
-    DynamicImage, DynamicImageChannel, DynamicImageChannelView, DynamicImageView,
-    IncompatibleImageError, InvalidLenError,
+pub use dynamic::{DynamicImage, DynamicImageChannel, DynamicImageChannelView, DynamicImageView};
+pub use error::{
+    IncompatibleChannel, IncompatibleChannelCount, IncompatibleChannelError, IncompatibleImage,
+    IncompatibleImageError, InvalidLenError, OverflowBufferLenError, PixelLayout,
 };
 pub use image::{Image, ImageView};
 pub use pixel::{PixelType, PixelTypePrimitive};

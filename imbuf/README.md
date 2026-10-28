@@ -58,7 +58,7 @@ use imbuf::{DynamicImageView, ImageView};
 let mut data = [1u8, 2, 3, 4];
 let two = NonZeroU32::new(2).unwrap();
 {
-    let mut image = ImageView::<u8, 1>::new_slice_mut(&mut data, two, two);
+    let mut image = ImageView::<u8, 1>::new_slice_mut(&mut data, two, two).unwrap();
     image.make_mut()[0][0] = 5;
     // Borrowed images can be converted to dynamic images and back
     let dynamic = DynamicImageView::from(image);
@@ -76,7 +76,7 @@ use imbuf::{Image, DynamicImage, ImageChannel, DynamicImageChannel};
 
 let pixel_data = vec![42, 1, 2];
 let data_addr = pixel_data.as_ptr();
-let image: Image<u8, 3> = imbuf::Image::new_vec(pixel_data, NonZeroU32::MIN, NonZeroU32::MIN);
+let image: Image<u8, 3> = imbuf::Image::new_vec(pixel_data, NonZeroU32::MIN, NonZeroU32::MIN).unwrap();
 let dynamic = DynamicImage::from(image);
 let dynamic_clone = dynamic.clone();
 {
@@ -91,6 +91,6 @@ let mut typed: Image<u8, 3> = dynamic_clone.try_into().unwrap();
 let [r, g, b] = typed.make_mut();
 r[0] = 0;
 assert_eq!(data_addr, r.as_ptr(), "dynamic went out of scope, so buffer can be reused");
-let expected = imbuf::Image::new_vec(vec![0, 1, 2], NonZeroU32::MIN, NonZeroU32::MIN);
+let expected = imbuf::Image::new_vec(vec![0, 1, 2], NonZeroU32::MIN, NonZeroU32::MIN).unwrap();
 assert_eq!(expected, typed, "images with different buffer can be compared");
 ```

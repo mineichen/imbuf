@@ -3,6 +3,7 @@ name = "imbuf"
 version = "0.4.0"
 authors.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Image buffers that abstract over underlying storage (Vec, Arc, or custom backends). Features copy-on-write semantics for efficient memory usage."
@@ -13,3 +14,10 @@ categories = ["multimedia::images", "graphics", "computer-vision", "data-structu
 [dependencies]
 bytemuck.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+assert_matches.workspace = true
+testresult.workspace = true
+
+[lints]
+workspace = true

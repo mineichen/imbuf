@@ -16,8 +16,17 @@
             inherit system;
             config.allowUnfreePredicate = pkg: builtins.elem (inputs.nixpkgs.lib.getName pkg) [ "claude-code" ];
           };
+          # Latest stable for development (e.g. a current rust-analyzer)
           rust = with inputs.fenix.packages.${system}; combine [
             stable.toolchain
+          ];
+          # Pinned to the MSRV (`rust-version` in Cargo.toml), used by `nix run .#test`.
+          # Update both together.
+          rustMsrv = with inputs.fenix.packages.${system}; combine [
+            (toolchainOf {
+              channel = "1.88.0";
+              sha256 = "sha256-Qxt8XAuaUR2OMdKbN4u8dBJOhSHxS+uS06Wl9+flVEk=";
+            }).toolchain
           ];
           rustNightlyWithMiri = with inputs.fenix.packages.${system}; combine [
             (latest.withComponents [
@@ -132,6 +141,22 @@
               export PATH="${rustNightlyWithMiri}/bin:${pkgs.stdenv.cc}/bin:${pkgs.openssl.out}/bin:$PATH"
               export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib pkgs.openssl.out ]}"
               exec ${rustNightlyWithMiri}/bin/cargo miri test -p imbuf-image -p imbuf
+            '');
+          };
+
+          # Runs the whole test suite with the MSRV toolchain. Arguments are passed to `cargo test`.
+          apps.test = {
+            type = "app";
+            program = toString (pkgs.writeShellScript "test-msrv" ''
+              set -euo pipefail
+              export PATH="${rustMsrv}/bin:${pkgs.lib.makeBinPath (opencvBuildInputs ++ [ pkgs.git ])}:$PATH"
+              ${pkgs.lib.concatStringsSep "\n" (pkgs.lib.mapAttrsToList
+                (name: value: "export ${name}=\"${value}\"") opencvEnvVars)}
+              export RUSTFLAGS="${rustRpathFlags}"
+              # Don't invalidate the build cache of the development toolchain
+              export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-target/msrv}"
+              rustc --version
+              exec cargo test --workspace --all-features "$@"
             '');
           };
 

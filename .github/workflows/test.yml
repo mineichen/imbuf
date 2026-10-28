@@ -23,7 +23,7 @@ jobs:
             experimental-features = nix-command flakes
 
       - name: Run cargo test
-        run: nix develop --command cargo test --workspace --all-features
+        run: nix run .#test
 
   miri:
     name: Miri Test Suite (Nix)

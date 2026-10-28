@@ -1,12 +1,10 @@
 #![doc = include_str!("../README.md")]
 
-use std::num::NonZeroU8;
-
 mod from_imbuf;
 mod into_imbuf;
 mod ref_image;
 
-pub use from_imbuf::{ImbufAsImage, ImbufAsImageMut, ImbufIntoImage, IncompatibleLayoutError};
+pub use from_imbuf::{ImbufAsImage, ImbufAsImageMut, ImbufIntoImage};
 pub use into_imbuf::{ImageIntoImbuf, IntoImbufError, IntoImbufErrorReason};
 pub use ref_image::{DynamicRefImage, DynamicRefImageMut};
 
@@ -16,10 +14,4 @@ pub use ref_image::{DynamicRefImage, DynamicRefImageMut};
 pub struct IncompatibleBufferSize {
     pub expected: usize,
     pub actual: usize,
-}
-
-fn non_zero_u8(value: usize) -> NonZeroU8 {
-    assert!(value <= 255, "usize must be less than 256");
-    #[allow(clippy::cast_possible_truncation)]
-    NonZeroU8::new(value as u8).unwrap()
 }

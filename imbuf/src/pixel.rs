@@ -45,8 +45,25 @@ pub(crate) fn flat_arc<TP: PixelType>(input: Arc<[TP]>) -> Arc<[TP::Primitive]> 
     // Safety: TP::Primitive is expected to be an aligned fraction of TP
     unsafe { Arc::from_raw(core::ptr::slice_from_raw_parts(ptr, len)) }
 }
+pub(crate) fn flat_slice<TP: PixelType>(input: &[TP]) -> &[TP::Primitive] {
+    // Multiplying with `TP::ELEMENTS` cannot overflow, as a slice longer than
+    // `usize::MAX / TP::ELEMENTS` (a multiple of it in bytes) cannot exist
+    let len = input.len() * usize::from(TP::ELEMENTS.get());
+
+    // Safety: TP::Primitive is expected to be an aligned fraction of TP
+    unsafe { core::slice::from_raw_parts(input.as_ptr().cast::<TP::Primitive>(), len) }
+}
+
+pub(crate) fn flat_slice_mut<TP: PixelType>(input: &mut [TP]) -> &mut [TP::Primitive] {
+    let len = input.len() * usize::from(TP::ELEMENTS.get());
+
+    // Safety: See flat_slice
+    unsafe { core::slice::from_raw_parts_mut(input.as_mut_ptr().cast::<TP::Primitive>(), len) }
+}
+
 pub(crate) fn flat_vec<TP: PixelType>(input: Vec<TP>) -> Vec<TP::Primitive> {
-    let (ptr, len, cap) = input.into_raw_parts();
+    let mut input = core::mem::ManuallyDrop::new(input);
+    let (ptr, len, cap) = (input.as_mut_ptr(), input.len(), input.capacity());
     let ptr = ptr.cast::<TP::Primitive>();
     // Multiplying with `TP::ELEMENTS` cannot overflow, as a `Vec<TP>` longer than
     // `usize::MAX / TP::ELEMENTS` (a multiple of it in bytes) couldn't be allocated
@@ -75,9 +92,7 @@ mod seal {
     impl<T: PixelTypePrimitive, const PIXEL_ELEMENTS: usize> SealedPixelType for [T; PIXEL_ELEMENTS] {
         const NZ_PIXEL_ELEMENTS: NonZeroUsize = {
             // 1 should be invalid too
-            if PIXEL_ELEMENTS <= 1 {
-                panic!("PIXEL_ELEMENTS should be at least 2")
-            }
+            assert!(PIXEL_ELEMENTS > 1, "PIXEL_ELEMENTS should be at least 2");
             NonZeroUsize::new(PIXEL_ELEMENTS).unwrap()
         };
     }

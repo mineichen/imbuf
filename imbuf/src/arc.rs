@@ -7,20 +7,19 @@ use std::{
 
 use crate::{
     DynamicImageChannel, DynamicImageChannelView, PixelTypePrimitive,
-    channel::{ChannelFactory, ImageChannelVTable, primitive_size},
+    channel::{ChannelFactory, ImageChannelVTable, bytes_per_primitive},
 };
 
 struct ArcFactory;
 
 impl DynamicImageChannel {
-    /// #Safety
+    /// # Safety
     /// In contrast to the public constructors, `T` doesn't have to be `Pod`.
-    /// This is only ok, if the DynamicImageChannel lives inside a ImageChannel, where it cannot be extracted.
+    /// This is only ok, if the `DynamicImageChannel` lives inside a `ImageChannel`, where it cannot be extracted.
     /// `DynamicImageChannel` themself may never have !Pod primitives, because upcasting just occurs based on size/alignment
-    /// You could easily transform Image<NonZeroU8> into a DynamicImage and turn it into `Image<u8>` and modify it.
+    /// You could easily transform `Image<NonZeroU8>` into a `DynamicImage` and turn it into `Image<u8>` and modify it.
     /// The drop function, which assumes `NonZeroU8` could get Zero values, which is UB.
-    /// Furthermore, width/height/pixel_elements are not checked against the input len
-
+    /// Furthermore, `width`/`height`/`pixel_elements` are not checked against the input len
     pub unsafe fn from_arc_flat_unchecked<T: PixelTypePrimitive>(
         input: Arc<[T]>,
         width: NonZeroU32,
@@ -28,8 +27,6 @@ impl DynamicImageChannel {
         pixel_elements: NonZeroU8,
     ) -> Self {
         let len = input.len();
-        // Panic, if the multiplication of the dimensions overflows or the length mismatches,
-        // instead of comparing against a wrapped value
         debug_assert_eq!(
             DynamicImageChannelView::ensure_valid_flat_len(width, height, pixel_elements, len),
             Ok(()),
@@ -106,7 +103,7 @@ impl<T: PixelTypePrimitive> ChannelFactory<T> for ArcFactory {
             drop: clear_arc_channel::<T>,
             clone: clone_arc_channel::<T>,
             make_mut: make_mut::<T>,
-            primitive_size: primitive_size::<T>,
+            bytes_per_primitive: bytes_per_primitive::<T>,
         }
     };
 }

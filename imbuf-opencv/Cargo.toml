@@ -3,7 +3,7 @@ name = "imbuf-opencv"
 version = "0.1.0"
 authors.workspace = true
 edition.workspace = true
-rust-version = "1.88"
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Zero-copy conversions between imbuf image buffers and OpenCV Mats."
@@ -14,10 +14,13 @@ categories = ["multimedia::images", "computer-vision"]
 [dependencies]
 bytemuck.workspace = true
 imbuf.workspace = true
-log.workspace = true
 opencv = { version = "0.101", default-features = false }
 
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }
 opencv = { version = "0.101", default-features = false, features = ["clang-runtime", "imgcodecs"] }
+assert_matches.workspace = true
 testresult.workspace = true
+
+[lints]
+workspace = true

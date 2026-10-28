@@ -1,14 +1,14 @@
 use std::{
     marker::PhantomData,
-    num::NonZeroU32,
+    num::{NonZeroU8, NonZeroU32},
     sync::atomic::{AtomicUsize, Ordering},
     vec::Vec,
 };
 
 use crate::{
-    DynamicImageChannel, DynamicImageChannelView, ImageChannel, PixelType, PixelTypePrimitive,
-    channel::{ChannelFactory, ImageChannelVTable, primitive_size},
-    dynamic::flat_len_checked,
+    DynamicImageChannel, DynamicImageChannelView, ImageChannel, InvalidLenError, PixelType,
+    PixelTypePrimitive,
+    channel::{ChannelFactory, ImageChannelVTable, bytes_per_primitive},
 };
 
 /// Internal structure that holds a Vec (as raw parts) and reference counts
@@ -138,37 +138,49 @@ impl<T: PixelTypePrimitive, const CHANNELS: usize> ChannelFactory<T>
             clone: clone_shared_vec::<T, CHANNELS>,
             make_mut: make_mut_shared_vec::<T, CHANNELS>,
             drop: drop_shared_vec::<T, CHANNELS>,
-            primitive_size: primitive_size::<T>,
+            bytes_per_primitive: bytes_per_primitive::<T>,
         }
     };
 }
 
-/// Create `ImageChannels` from a Vec, sharing the underlying storage
-/// #Panics
-/// If any size exceeds usize::MAX
-pub fn create_shared_channels<TP: PixelType, const CHANNELS: usize>(
+/// Creates channels, which share the planar `vec` (all pixels of the first channel, then the
+/// second...). Each channel can have its own size (e.g. the smaller U and V planes of YUV).
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "For channels of different sizes (e.g. YUV), images use the unchecked version"
+    )
+)]
+pub(crate) fn create_shared_channels<TP: PixelType, const CHANNELS: usize>(
+    vec: Vec<TP::Primitive>,
+    sizes: [(NonZeroU32, NonZeroU32); CHANNELS],
+) -> Result<[ImageChannel<TP>; CHANNELS], InvalidLenError> {
+    ensure_valid_shared_len(&sizes, TP::ELEMENTS, vec.len())?;
+    // Safety: The length is checked above
+    Ok(unsafe { create_shared_channels_unchecked(vec, sizes) })
+}
+
+/// Unchecked version of [`create_shared_channels`]
+///
+/// # Safety
+/// The lengths of the channels (`width * height * TP::ELEMENTS`) and their sum mustn't overflow
+/// `usize` and the sum has to match `vec.len()` (see [`ensure_valid_shared_len`])
+pub(crate) unsafe fn create_shared_channels_unchecked<TP: PixelType, const CHANNELS: usize>(
     mut vec: Vec<TP::Primitive>,
     sizes: [(NonZeroU32, NonZeroU32); CHANNELS],
 ) -> [ImageChannel<TP>; CHANNELS] {
-    // Panic, if the multiplication of the dimensions or the sum overflows, instead of comparing
-    // against wrapped values
-
-    let lens: [usize; CHANNELS] = sizes.map(|(width, height)| {
-        flat_len_checked(width, height, TP::ELEMENTS).expect("The buffer length overflows usize")
-    });
-    let total = lens
-        .iter()
-        // Panic, if the sum overflows, instead of comparing against a wrapped value
-        .try_fold(0usize, |total, &len| total.checked_add(len))
-        .expect("The buffer length overflows usize");
-    assert_eq!(total, vec.len(), "Incompatible Buffer-Size");
-    // Create SharedVecData
+    let _non_zero = const { crate::unwrap_usize_to_nonzero_u8(CHANNELS) };
+    debug_assert_eq!(
+        Ok(()),
+        ensure_valid_shared_len(&sizes, TP::ELEMENTS, vec.len())
+    );
     let base = vec.as_mut_ptr();
-    let shared_data = Box::new(SharedVecData::<TP::Primitive, CHANNELS>::new(vec));
-    let data_ptr = Box::into_raw(shared_data);
+    let data_ptr = Box::into_raw(Box::new(SharedVecData::<TP::Primitive, CHANNELS>::new(vec)));
+    let vtable =
+        <SharedVecFactory<TP::Primitive, CHANNELS> as ChannelFactory<TP::Primitive>>::VTABLE;
     let mut start = 0;
 
-    // Create ImageChannels for each slice
     std::array::from_fn(|i| {
         let (width, height) = sizes[i];
         let metadata = Box::new(SharedVecMetadata::<TP::Primitive, CHANNELS> {
@@ -176,85 +188,109 @@ pub fn create_shared_channels<TP: PixelType, const CHANNELS: usize>(
             slice_idx: i,
             start,
         });
-        let metadata_ptr = Box::into_raw(metadata);
-        let vtable =
-            <SharedVecFactory<TP::Primitive, CHANNELS> as ChannelFactory<TP::Primitive>>::VTABLE;
-
-        // Safety: The slice is within the Vec, as the total length is checked above
-        let ptr = unsafe { base.add(start) };
-        // All lengths are part of the total, which is checked above to be the Vec length, so
-        // adding them and the subsequent additions of `start` cannot overflow
-        let len = lens[i];
-        start += len;
-
-        // Safety: The Vec keeps the slice alive until the vtable drops it and the vtable is
-        // built for TP::Primitive with TP::ELEMENTS
-        unsafe {
-            let channel = DynamicImageChannel::from_raw_parts(
-                ptr.cast(),
+        // Safety: The slice is within the Vec (precondition). The Vec keeps the slice alive until
+        // the vtable drops it and the vtable is built for TP::Primitive with TP::ELEMENTS
+        let channel = unsafe {
+            DynamicImageChannel::from_raw_parts(
+                base.add(start).cast(),
                 width,
                 height,
                 TP::ELEMENTS,
                 vtable,
-                metadata_ptr.cast(),
-            );
-            ImageChannel::from_dynamic_unchecked(channel)
-        }
+                Box::into_raw(metadata).cast(),
+            )
+        };
+        // The lengths sum up to the length of the Vec (precondition), so this cannot overflow
+        start += channel.len_flat();
+        // Safety: The vtable is built for TP::Primitive with TP::ELEMENTS
+        unsafe { ImageChannel::from_dynamic_unchecked(channel) }
     })
+}
+
+/// Checks that the lengths of the channels (`width * height * pixel_elements`) and their sum
+/// don't overflow `usize` and that the sum matches `len`
+fn ensure_valid_shared_len(
+    sizes: &[(NonZeroU32, NonZeroU32)],
+    pixel_elements: NonZeroU8,
+    len: usize,
+) -> Result<(), InvalidLenError> {
+    let mut total: usize = 0;
+    for &(width, height) in sizes {
+        let channel_len = DynamicImageChannelView::flat_len_checked(
+            width,
+            height,
+            pixel_elements,
+            NonZeroU8::MIN,
+        )?;
+        total = total
+            .checked_add(channel_len)
+            .ok_or(InvalidLenError::BufferMismatch {
+                expected: len,
+                actual: usize::MAX,
+            })?;
+    }
+    if total == len {
+        Ok(())
+    } else {
+        Err(InvalidLenError::BufferMismatch {
+            expected: total,
+            actual: len,
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use assert_matches::assert_matches;
+    use testresult::TestResult;
 
     use super::*;
 
+    const NZ_1: NonZeroU32 = NonZeroU32::MIN;
+    const NZ_2: NonZeroU32 = NonZeroU32::new(2).unwrap();
+
     #[test]
-    fn test_shared_vec_make_mut() {
-        let vec = vec![0u8, 1u8, 2u8, 3u8, 4u8, 5u8];
+    fn test_shared_vec_make_mut() -> TestResult {
+        let vec = vec![0u8, 1, 2, 3, 4, 5];
         let orig_ptr = vec.as_ptr();
-        let width = NonZeroU32::new(2).unwrap();
-        let height = NonZeroU32::new(1).unwrap();
-        let mut channels = create_shared_channels::<u8, 3>(vec, [(width, height); 3]);
+        let mut channels = create_shared_channels::<u8, 3>(vec, [(NZ_2, NZ_1); 3])?;
         let mutbuf = channels[0].make_mut();
         assert_eq!(mutbuf.as_ptr(), orig_ptr);
+        Ok(())
     }
 
     #[test]
-    fn non_unique_clone_make_mut() {
-        let vec = vec![0u8, 1u8, 2u8, 3u8, 4u8, 5u8];
+    fn non_unique_clone_make_mut() -> TestResult {
+        let vec = vec![0u8, 1, 2, 3, 4, 5];
         let orig_ptr = vec.as_ptr();
-        let width = NonZeroU32::new(2).unwrap();
-        let height = NonZeroU32::new(1).unwrap();
-        let mut channels = create_shared_channels::<u8, 3>(vec, [(width, height); 3]);
+        let mut channels = create_shared_channels::<u8, 3>(vec, [(NZ_2, NZ_1); 3])?;
         let clone = channels[0].clone();
         let mutbuf = channels[0].make_mut();
         assert_eq!(clone.buffer().as_ptr(), orig_ptr);
         assert_ne!(mutbuf.as_ptr(), orig_ptr);
+        Ok(())
     }
 
     #[test]
-    fn unique_after_dropped_clone_make_mut() {
-        let vec = vec![0u8, 1u8, 2u8, 3u8, 4u8, 5u8];
+    fn unique_after_dropped_clone_make_mut() -> TestResult {
+        let vec = vec![0u8, 1, 2, 3, 4, 5];
         let orig_ptr = vec.as_ptr();
-        let width = NonZeroU32::new(2).unwrap();
-        let height = NonZeroU32::new(1).unwrap();
-        let mut channels = create_shared_channels::<u8, 3>(vec, [(width, height); 3]);
+        let mut channels = create_shared_channels::<u8, 3>(vec, [(NZ_2, NZ_1); 3])?;
         drop(channels[0].clone());
         let mutbuf = channels[0].make_mut();
         assert_eq!(mutbuf.as_ptr(), orig_ptr);
+        Ok(())
     }
 
     #[test]
-    fn test_shared_vec_basic() {
-        let vec = vec![0u8, 1u8, 2u8, 3u8, 4u8, 5u8];
+    fn test_shared_vec_basic() -> TestResult {
+        let vec = vec![0u8, 1, 2, 3, 4, 5];
         // Get the address of the original Vec's data before it's moved
         let original_ptr = vec.as_ptr();
 
-        let width = NonZeroU32::new(2).unwrap();
-        let height = NonZeroU32::new(1).unwrap();
         let len_per_channel = 2;
 
-        let channels = create_shared_channels::<u8, 3>(vec, [(width, height); 3]);
+        let channels = create_shared_channels::<u8, 3>(vec, [(NZ_2, NZ_1); 3])?;
 
         // Verify that channels point to the correct offsets in the original Vec
         assert_eq!(
@@ -272,34 +308,76 @@ mod tests {
             unsafe { original_ptr.add(len_per_channel * 2) },
             "Channel 2 should point to offset 4 in the original Vec"
         );
+        Ok(())
     }
 
     #[test]
-    fn test_shared_vec_clone() {
-        let vec = vec![0u8, 1u8, 2u8, 3u8];
-        let width = NonZeroU32::new(2).unwrap();
-        let height = NonZeroU32::new(1).unwrap();
+    fn test_shared_vec_clone() -> TestResult {
+        let vec = vec![0u8, 1, 2, 3];
 
-        let channels = create_shared_channels::<u8, 2>(vec, [(width, height); 2]);
+        let channels = create_shared_channels::<u8, 2>(vec, [(NZ_2, NZ_1); 2])?;
         let channel1_clone = channels[0].clone();
 
         assert_eq!(
             channels[0].buffer().as_ptr(),
             channel1_clone.buffer().as_ptr()
         );
+        Ok(())
     }
 
     #[test]
-    fn non_unique_make_mut_copies_all_pixel_elements() {
+    fn non_unique_make_mut_copies_all_pixel_elements() -> TestResult {
         let vec = vec![0u8, 1, 2, 3, 4, 5, 6, 7];
-        let width = NonZeroU32::new(2).unwrap();
-        let height = NonZeroU32::new(1).unwrap();
-        let mut channels = create_shared_channels::<[u8; 2], 2>(vec, [(width, height); 2]);
+        let mut channels = create_shared_channels::<[u8; 2], 2>(vec, [(NZ_2, NZ_1); 2])?;
         let clone = channels[1].clone();
 
         channels[1].make_mut()[0] = [8, 9];
         assert_eq!(channels[1].buffer(), &[[8, 9], [6, 7]]);
         assert_eq!(clone.buffer(), &[[4, 5], [6, 7]]);
         assert_eq!(channels[0].buffer(), &[[0, 1], [2, 3]]);
+        Ok(())
+    }
+
+    #[test]
+    fn channels_of_different_sizes() -> TestResult {
+        // E.g. YUV 4:2:0, where U and V have a quarter of the pixels of Y
+        let vec = vec![0u16, 1, 2, 3, 4, 5];
+        let channels =
+            create_shared_channels::<u16, 3>(vec, [(NZ_2, NZ_2), (NZ_1, NZ_1), (NZ_1, NZ_1)])?;
+        assert_eq!(channels[0].buffer(), &[0, 1, 2, 3]);
+        assert_eq!(channels[1].buffer(), &[4]);
+        assert_eq!(channels[2].buffer(), &[5]);
+        Ok(())
+    }
+
+    #[test]
+    fn channel_which_does_not_fit_fails() {
+        // The second channel requires 4 elements, but only 2 are left
+        assert_matches!(
+            create_shared_channels::<[u8; 2], 2>(vec![0; 6], [(NZ_2, NZ_1); 2]),
+            Err(InvalidLenError::BufferMismatch {
+                expected: 8,
+                actual: 6
+            })
+        );
+    }
+
+    #[test]
+    fn remaining_elements_fail() {
+        assert_matches!(
+            create_shared_channels::<[u8; 2], 2>(vec![0; 10], [(NZ_2, NZ_1); 2]),
+            Err(InvalidLenError::BufferMismatch {
+                expected: 8,
+                actual: 10
+            })
+        );
+    }
+
+    #[test]
+    fn overflowing_channel_fails() {
+        assert_matches!(
+            create_shared_channels::<[u8; 255], 1>(vec![], [(NonZeroU32::MAX, NonZeroU32::MAX)]),
+            Err(InvalidLenError::Overflow(_))
+        );
     }
 }

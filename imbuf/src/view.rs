@@ -4,7 +4,7 @@ use std::num::{NonZeroU8, NonZeroU32};
 
 use crate::{
     DynamicImageChannel, DynamicImageChannelView, PixelTypePrimitive,
-    channel::{ChannelFactory, ImageChannelVTable, primitive_size},
+    channel::{ChannelFactory, ImageChannelVTable, bytes_per_primitive},
 };
 
 /// Shared borrow of a buffer. `make_mut` copies the buffer into a Vec.
@@ -67,7 +67,7 @@ impl<T: PixelTypePrimitive> ChannelFactory<T> for SliceFactory {
         clone: clone_slice_channel,
         make_mut: copy_into_arc::<T>,
         drop: noop_drop,
-        primitive_size: primitive_size::<T>,
+        bytes_per_primitive: bytes_per_primitive::<T>,
     };
 }
 
@@ -105,7 +105,7 @@ impl<T: PixelTypePrimitive> ChannelFactory<T> for SliceMutFactory {
             clone: crate::arc::clone_slice_into_arc_channel::<T>,
             make_mut: make_original_mut::<T>,
             drop: noop_drop,
-            primitive_size: primitive_size::<T>,
+            bytes_per_primitive: bytes_per_primitive::<T>,
         }
     };
 }

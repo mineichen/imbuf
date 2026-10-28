@@ -2,16 +2,20 @@ use std::{
     fmt::{self, Debug, Formatter},
     iter::{self, once},
     marker::PhantomData,
-    mem::MaybeUninit,
     num::{NonZeroU8, NonZeroU32, NonZeroUsize},
     ops::Deref,
-    ptr, slice, vec,
+    slice, vec,
 };
 
 use bytemuck::Pod;
 
 use crate::{
-    ImageChannelView, ImageView, PixelType, PixelTypePrimitive, channel::ImageChannelVTable,
+    ImageChannelView, ImageView, IncompatibleImage, InvalidLenError, PixelType, PixelTypePrimitive,
+    channel::ImageChannelVTable,
+    error::{
+        IncompatibleChannelCount, IncompatibleChannelError, IncompatibleImageError,
+        OverflowBufferLenError, PixelLayout,
+    },
 };
 /// Image with number of channels and their types and dimensions only known at runtime
 /// There are no guarantees that the types or dimensions of channels match. See [`ImageView`] for more information.
@@ -47,11 +51,10 @@ impl<'a> DynamicImageView<'a> {
         &self.channels[self.channels.len() - 1]
     }
 
-    /// Checks, if all channels have the same width, height, `pixel_elements` and `primitive_size`
+    /// Checks, if all channels have the same width, height and [`PixelLayout`]
     #[must_use]
     pub fn is_uniform(&self) -> bool {
-        let (first, mut rest) =
-            self.mapped_channels(|x| (x.primitive_size(), x.pixel_elements(), x.dimensions()));
+        let (first, mut rest) = self.mapped_channels(|x| (x.pixel_layout(), x.dimensions()));
         rest.all(|x| x == first)
     }
 
@@ -107,6 +110,45 @@ impl<'a> DynamicImageView<'a> {
     pub fn len_nonzero(&self) -> NonZeroUsize {
         NonZeroUsize::new(self.channels.len()).unwrap()
     }
+
+    /// Checks, that the image consists of a single (e.g. interleaved) channel, as most other image
+    /// libraries require
+    ///
+    /// # Errors
+    /// [`IncompatibleChannelCount`], if the image has more than one channel
+    pub fn ensure_single_channel(&self) -> Result<(), IncompatibleChannelCount> {
+        let actual = self.len_nonzero();
+        if actual == NonZeroUsize::MIN {
+            Ok(())
+        } else {
+            Err(IncompatibleChannelCount {
+                expected: NonZeroU8::MIN,
+                actual,
+            })
+        }
+    }
+
+    /// Checks, that the channel count, the pixel layouts and the dimensions match
+    fn ensure_compatible<T: PixelType, const CHANNELS: usize>(
+        &self,
+    ) -> Result<(), IncompatibleImageError> {
+        let actual = self.len_nonzero();
+        if actual.get() != CHANNELS {
+            return Err(IncompatibleChannelCount {
+                expected: const { crate::unwrap_usize_to_nonzero_u8(CHANNELS) },
+                actual,
+            }
+            .into());
+        }
+        self.channels
+            .iter()
+            .try_for_each(DynamicImageChannelView::ensure_fits_pixel::<T>)?;
+        crate::image::check_dimensions(
+            self.channels
+                .iter()
+                .map(DynamicImageChannelView::dimensions),
+        )
+    }
 }
 
 // Deref slice only, to make sure, noone can create a DynamicImageView with a empty Vec
@@ -137,9 +179,8 @@ impl std::ops::DerefMut for DynamicImageView<'_> {
 ///
 /// The channel only knows the size of its primitive (e.g. 2 bytes for `u16`). Its buffer can
 /// therefore be viewed as any [`Pod`] primitive of the same size and alignment, e.g. via
-/// [`DynamicImageChannelView::buffer_flat`], [`DynamicImageChannelView::try_cast`] or
-/// `ImageChannelView::try_from`. For the same reason, only [`ImageChannelView`]s of `Pod`
-/// primitives can be converted into a `DynamicImageChannelView`:
+/// [`DynamicImageChannelView::buffer_flat`], [`DynamicImageChannelView::try_cast`] or `ImageChannelView::try_from`.
+/// For the same reason, only [`ImageChannelView`]s of `Pod` primitives can be converted into a `DynamicImageChannelView`:
 ///
 /// ```compile_fail,E0277
 /// use std::num::{NonZeroU8, NonZeroU32};
@@ -149,7 +190,7 @@ impl std::ops::DerefMut for DynamicImageView<'_> {
 /// struct NonZero(NonZeroU8);
 /// impl PixelTypePrimitive for NonZero {}
 ///
-/// let channel = ImageChannel::new_vec(vec![NonZero(NonZeroU8::MIN)], NonZeroU32::MIN, NonZeroU32::MIN);
+/// let channel = ImageChannel::new_vec(vec![NonZero(NonZeroU8::MIN)], NonZeroU32::MIN, NonZeroU32::MIN).unwrap();
 /// // Would allow writing 0 through `ImageChannel<u8>`
 /// let dynamic = DynamicImageChannel::from(channel);
 /// ```
@@ -164,7 +205,7 @@ impl std::ops::DerefMut for DynamicImageView<'_> {
 #[repr(C)]
 pub struct DynamicImageChannelView<'a> {
     /// Pointer to the buffer, which is `len_flat()` primitives of the size
-    /// `vtable.primitive_size()` long
+    /// `vtable.bytes_per_primitive()` long
     ptr: *const u8,
     width: NonZeroU32,
     height: NonZeroU32,
@@ -179,20 +220,15 @@ pub struct DynamicImageChannelView<'a> {
 pub type DynamicImageChannel = DynamicImageChannelView<'static>;
 
 impl DynamicImageChannel {
-    /// # Panics
-    /// Panics if the buffer size is not compatible with the width, height and `pixel_elements`.
-    #[must_use]
     pub fn new_vec<T: PixelType + Pod>(
         data: Vec<T>,
         width: NonZeroU32,
         height: NonZeroU32,
-    ) -> Self {
-        assert_eq!(
-            DynamicImageChannel::ensure_valid_len(width, height, data.len()),
-            Ok(())
-        );
+    ) -> Result<Self, InvalidLenError> {
+        DynamicImageChannel::ensure_valid_len(width, height, data.len())?;
         let data_flat = crate::pixel::flat_vec(data);
-        unsafe { Self::from_vec_flat_unchecked(data_flat, width, height, T::ELEMENTS) }
+        // Safety: The length is checked above and T is Pod
+        Ok(unsafe { Self::from_vec_flat_unchecked(data_flat, width, height, T::ELEMENTS) })
     }
 }
 
@@ -201,7 +237,7 @@ impl<'a> DynamicImageChannelView<'a> {
     ///
     /// # Safety
     /// The following invariants have to hold:
-    /// - The size of the buffer in bytes (`width * height * pixel_elements * vtable.primitive_size()`)
+    /// - The size of the buffer in bytes (`width * height * pixel_elements * vtable.bytes_per_primitive()`)
     ///   doesn't exceed `usize::MAX`, and the multiplications to calculate it don't overflow
     ///   `usize`, which implies that `width * height * pixel_elements` matches the buffer length.
     ///   [`DynamicImageChannelView::ensure_valid_flat_len`] checks this, e.g. for untrusted input.
@@ -224,13 +260,16 @@ impl<'a> DynamicImageChannelView<'a> {
         vtable: &'static ImageChannelVTable,
         data: *mut (),
     ) -> Self {
-        #[cfg(debug_assertions)]
-        let _asserted = usize::try_from(
-            u64::from(height.get())
-                .strict_mul(u64::from(width.get()).strict_mul(u64::from(pixel_elements.get()))),
-        )
-        .expect("Expected valid raw parts")
-        .strict_mul((vtable.primitive_size)().get());
+        debug_assert_eq!(
+            Ok(()),
+            Self::ensure_valid_byte_len(
+                width,
+                height,
+                pixel_elements,
+                (vtable.bytes_per_primitive)()
+            ),
+            "The buffer size of the raw parts overflows usize"
+        );
         Self {
             ptr,
             width,
@@ -288,8 +327,14 @@ impl<'a> DynamicImageChannelView<'a> {
 
     /// Size of a single primitive in bytes
     #[must_use]
-    pub fn primitive_size(&self) -> NonZeroUsize {
-        (self.vtable.primitive_size)()
+    pub fn bytes_per_primitive(&self) -> NonZeroUsize {
+        (self.vtable.bytes_per_primitive)()
+    }
+
+    /// `pixel_elements` and `bytes_per_primitive` of the channel
+    #[must_use]
+    pub fn pixel_layout(&self) -> PixelLayout {
+        PixelLayout::new(self.pixel_elements, self.bytes_per_primitive())
     }
 
     #[must_use]
@@ -315,64 +360,28 @@ impl<'a> DynamicImageChannelView<'a> {
         self.len() * self.pixel_elements.get() as usize
     }
 
-    /// Checks that `width * height * pixel_elements` doesn't overflow `usize` and matches
-    /// `buffer_len`, e.g. to validate untrusted dimensions before passing them to
-    /// [`DynamicImageChannelView::from_raw_parts`]. For buffers, which store one element per
-    /// pixel, [`DynamicImageChannelView::ensure_valid_len`] can be used instead.
-    ///
-    /// # Errors
-    /// Returns [`InvalidLenError::LenOverflow`], if the multiplication overflows `usize`, and
-    /// [`InvalidLenError::BufferMismatch`], if it doesn't match `buffer_len`.
-    pub const fn ensure_valid_flat_len(
-        width: NonZeroU32,
-        height: NonZeroU32,
-        pixel_elements: NonZeroU8,
-        buffer_len: usize,
-    ) -> Result<(), InvalidLenError> {
-        match flat_len_checked(width, height, pixel_elements) {
-            Ok(len) if len == buffer_len => Ok(()),
-            Ok(_) => Err(InvalidLenError::BufferMismatch),
-            Err(e) => Err(InvalidLenError::Overflow(e)),
-        }
+    /// Fails, if `pixel_elements`, the size or the alignment of `T::Primitive` don't match
+    pub fn buffer<T: PixelType + Pod>(&self) -> Result<&[T], IncompatibleChannelError> {
+        self.ensure_fits_pixel::<T>()?;
+        // Safety: The layout is checked. Pod accepts any bit pattern
+        Ok(unsafe { self.buffer_unchecked() })
     }
 
-    /// Checks that `width * height` (the number of pixels) doesn't overflow `usize` and matches
-    /// `buffer_len`, e.g. to validate untrusted dimensions for a buffer, which stores one element
-    /// per pixel (like the buffers of [`ImageChannel::new_vec`]). For buffers, which store
-    /// multiple primitives per pixel, use [`DynamicImageChannelView::ensure_valid_flat_len`].
-    ///
-    /// # Errors
-    /// Returns [`InvalidLenError::LenOverflow`], if the multiplication overflows `usize`, and
-    /// [`InvalidLenError::BufferMismatch`], if it doesn't match `buffer_len`.
-    pub const fn ensure_valid_len(
-        width: NonZeroU32,
-        height: NonZeroU32,
-        buffer_len: usize,
-    ) -> Result<(), InvalidLenError> {
-        // A buffer with one element per pixel is a flat buffer with one primitive per pixel
-        Self::ensure_valid_flat_len(width, height, NonZeroU8::MIN, buffer_len)
-    }
-
-    pub fn buffer<T: PixelType + Pod>(&self) -> Option<&[T]> {
-        self.fits_pixel::<T>()
-            .then(|| unsafe { self.buffer_unchecked() })
-    }
-
+    /// # Safety
+    /// `T` must have the layout of the channel's pixel (see [`DynamicImageChannelView::buffer`]) and the buffer must contain valid values of `T`.
+    #[must_use]
     pub unsafe fn buffer_unchecked<T: PixelType>(&self) -> &[T] {
-        debug_assert!(
-            self.fits_pixel::<T>(),
-            "The size or alignment of {} doesn't match the channel",
-            std::any::type_name::<T>()
-        );
+        debug_assert_eq!(Ok(()), self.ensure_fits_pixel::<T>());
         unsafe { slice::from_raw_parts(self.ptr.cast::<T>(), self.len()) }
     }
 
-    /// Returns `None`, if the size or the alignment of `T` don't match the primitive of the channel
-    #[must_use]
-    pub fn buffer_flat<T: PixelTypePrimitive + Pod>(&self) -> Option<&[T]> {
+    /// Fails, if the size or the alignment of `T` don't match the primitive of the channel
+    pub fn buffer_flat<T: PixelTypePrimitive + Pod>(
+        &self,
+    ) -> Result<&[T], IncompatibleChannelError> {
+        self.ensure_fits_primitive::<T>()?;
         // Safety: Size and alignment are checked. Pod accepts any bit pattern
-        self.fits_primitive::<T>()
-            .then(|| unsafe { self.buffer_flat_unchecked() })
+        Ok(unsafe { self.buffer_flat_unchecked() })
     }
 
     /// # Safety
@@ -380,29 +389,26 @@ impl<'a> DynamicImageChannelView<'a> {
     /// buffer must contain valid values of `T`.
     #[must_use]
     pub unsafe fn buffer_flat_unchecked<T: PixelTypePrimitive>(&self) -> &[T] {
-        debug_assert!(
-            self.fits_primitive::<T>(),
-            "The size or alignment of {} doesn't match the channel",
-            std::any::type_name::<T>()
-        );
+        debug_assert_eq!(Ok(()), self.ensure_fits_primitive::<T>());
         // Safety: Forwarded to the caller. The length is valid due to the invariants of the channel
         unsafe { slice::from_raw_parts(self.ptr.cast::<T>(), self.len_flat()) }
     }
 
     /// Mutable access to the buffer, which is copied if it is shared (copy on write).
     ///
-    /// Returns `None`, if the size or the alignment of `T` don't match the primitive of the channel
-    pub fn make_mut_flat<T: PixelTypePrimitive + Pod>(&mut self) -> Option<&mut [T]> {
-        if !self.fits_primitive::<T>() {
-            return None;
-        }
-        Some(unsafe { self.make_mut_flat_unchecked() })
+    /// Fails, if the size or the alignment of `T` don't match the primitive of the channel
+    pub fn make_mut_flat<T: PixelTypePrimitive + Pod>(
+        &mut self,
+    ) -> Result<&mut [T], IncompatibleChannelError> {
+        self.ensure_fits_primitive::<T>()?;
+        // Safety: Size and alignment are checked. Pod accepts any bit pattern
+        Ok(unsafe { self.make_mut_flat_unchecked() })
     }
 
     pub(crate) unsafe fn make_mut_flat_unchecked<T: PixelTypePrimitive>(&mut self) -> &mut [T] {
         self.make_exclusive();
         // Safety: Size and alignment are checked after make_mut, which might reallocate
-        debug_assert!(self.fits_primitive::<T>());
+        debug_assert_eq!(Ok(()), self.ensure_fits_primitive::<T>());
         // Safety: Forwarded to the caller
         unsafe { slice::from_raw_parts_mut(self.ptr.cast::<T>().cast_mut(), self.len_flat()) }
     }
@@ -415,47 +421,169 @@ impl<'a> DynamicImageChannelView<'a> {
 
     #[must_use]
     pub fn buffer_flat_bytes(&self) -> &[u8] {
-        let len = self.len_flat() * self.primitive_size().get();
+        let len = self.len_flat() * self.bytes_per_primitive().get();
         // Safety: The buffer is initialized (invariant of the channel)
         unsafe { slice::from_raw_parts(self.ptr, len) }
     }
 
     /// Try to view this channel as a `ImageChannelView<TP>`.
     ///
-    /// Returns `None`, if `pixel_elements`, the size or the alignment of `TP::Primitive` don't match.
+    /// Fails, if `pixel_elements`, the size or the alignment of `TP::Primitive` don't match.
     /// Use [`ImageChannelView::view`] on the result to get a borrowed channel by value.
-    #[must_use]
-    pub fn try_cast<TP: PixelType>(&self) -> Option<&ImageChannelView<'a, TP>>
+    pub fn try_cast<TP: PixelType>(
+        &self,
+    ) -> Result<&ImageChannelView<'a, TP>, IncompatibleChannelError>
     where
         TP::Primitive: Pod,
     {
-        // Safety: `ImageChannelView` is repr(transparent) over `DynamicImageChannelView`.
-        // The layout is checked and Pod accepts any bit pattern
-        self.fits_pixel::<TP>()
-            .then(|| unsafe { &*ptr::from_ref(self).cast::<ImageChannelView<'a, TP>>() })
+        self.try_into()
     }
 
-    /// Mutable version of [`DynamicImageChannelView::try_cast`]
-    #[must_use]
-    pub fn try_cast_mut<TP: PixelType>(&mut self) -> Option<&mut ImageChannelView<'a, TP>>
+    /// Mutable version of [`DynamicImageChannelView::try_cast`].
+    pub fn try_cast_mut<TP: PixelType>(
+        &mut self,
+    ) -> Result<&mut ImageChannelView<'a, TP>, IncompatibleChannelError>
     where
         TP::Primitive: Pod,
     {
-        // Safety: See try_cast
-        self.fits_pixel::<TP>()
-            .then(|| unsafe { &mut *ptr::from_mut(self).cast::<ImageChannelView<'a, TP>>() })
+        self.try_into()
     }
 
-    /// Checks, if the buffer can be viewed as `T`
-    pub(crate) fn fits_primitive<T>(&self) -> bool {
-        self.primitive_size().get() == size_of::<T>() && self.ptr.cast::<T>().is_aligned()
+    /// Checks that `width * height * pixel_elements` doesn't overflow `usize` and matches
+    /// `buffer_len`, e.g. to validate untrusted dimensions before passing them to
+    /// [`DynamicImageChannelView::from_raw_parts`]. For buffers, which store one element per
+    /// pixel, [`DynamicImageChannelView::ensure_valid_len`] can be used instead.
+    pub const fn ensure_valid_flat_len(
+        width: NonZeroU32,
+        height: NonZeroU32,
+        pixel_elements: NonZeroU8,
+        buffer_len: usize,
+    ) -> Result<(), InvalidLenError> {
+        Self::ensure_len(width, height, pixel_elements, NonZeroU8::MIN, buffer_len)
     }
 
-    /// Checks, if the buffer can be viewed as `TP`
-    pub(crate) fn fits_pixel<TP: PixelType>(&self) -> bool {
-        self.pixel_elements() == TP::ELEMENTS && self.fits_primitive::<TP::Primitive>()
+    /// Checks that `width * height` (the number of pixels) doesn't overflow `usize` and matches
+    /// `buffer_len`, e.g. to validate untrusted dimensions for a buffer, which stores one element
+    /// per pixel (like the buffers of [`ImageChannel::new_vec`](crate::ImageChannel::new_vec)). For buffers, which store
+    /// multiple primitives per pixel, use [`DynamicImageChannelView::ensure_valid_flat_len`].
+    pub const fn ensure_valid_len(
+        width: NonZeroU32,
+        height: NonZeroU32,
+        buffer_len: usize,
+    ) -> Result<(), InvalidLenError> {
+        Self::ensure_len(width, height, NonZeroU8::MIN, NonZeroU8::MIN, buffer_len)
+    }
+
+    /// Checks that `width * height * pixel_elements * channels` doesn't overflow `usize` and
+    /// matches `len`
+    pub(crate) const fn ensure_len(
+        width: NonZeroU32,
+        height: NonZeroU32,
+        pixel_elements: NonZeroU8,
+        channels: NonZeroU8,
+        len: usize,
+    ) -> Result<(), InvalidLenError> {
+        match Self::flat_len_checked(width, height, pixel_elements, channels) {
+            Ok(expected) if expected == len => Ok(()),
+            Ok(expected) => Err(InvalidLenError::BufferMismatch {
+                expected,
+                actual: len,
+            }),
+            Err(e) => Err(InvalidLenError::Overflow(e)),
+        }
+    }
+
+    /// Fails with the reason, if the buffer can't be viewed as `TP`
+    pub fn ensure_fits_pixel<TP: PixelType>(&self) -> Result<(), IncompatibleChannelError> {
+        if self.pixel_elements() == TP::ELEMENTS
+            && self.ensure_fits_primitive::<TP::Primitive>().is_ok()
+        {
+            Ok(())
+        } else {
+            let required = PixelLayout::of::<TP>();
+            Err(self.incompatible_error::<TP, TP::Primitive>(required))
+        }
+    }
+
+    /// Fails with the reason, if the flat buffer can't be viewed as `T`. In contrast to
+    /// [`DynamicImageChannelView::ensure_fits_pixel`], `pixel_elements` doesn't have to match.
+    pub(crate) fn ensure_fits_primitive<T: PixelTypePrimitive>(
+        &self,
+    ) -> Result<(), IncompatibleChannelError> {
+        if self.bytes_per_primitive().get() == size_of::<T>() && self.ptr.cast::<T>().is_aligned() {
+            Ok(())
+        } else {
+            let required = PixelLayout::of_primitive::<T>(self.pixel_elements());
+            Err(self.incompatible_error::<T, T>(required))
+        }
+    }
+
+    /// Describes, why the buffer can't be viewed as `TTarget` with the primitive `TPrimitive`
+    fn incompatible_error<TTarget, TPrimitive>(
+        &self,
+        required: PixelLayout,
+    ) -> IncompatibleChannelError {
+        IncompatibleChannelError {
+            actual: self.pixel_layout(),
+            required: Some(required),
+            aligned: self.ptr.cast::<TPrimitive>().is_aligned(),
+            target_pixel_type: std::any::type_name::<TTarget>(),
+        }
+    }
+
+    /// Checks that the size of the buffer in bytes (`width * height * pixel_elements *
+    /// bytes_per_primitive`) doesn't overflow `usize`, which [`DynamicImageChannelView::from_raw_parts`]
+    /// requires
+    fn ensure_valid_byte_len(
+        width: NonZeroU32,
+        height: NonZeroU32,
+        pixel_elements: NonZeroU8,
+        bytes_per_primitive: NonZeroUsize,
+    ) -> Result<(), OverflowBufferLenError> {
+        let len = Self::flat_len_checked(width, height, pixel_elements, NonZeroU8::MIN)?;
+        len.checked_mul(bytes_per_primitive.get())
+            .map(drop)
+            .ok_or(OverflowBufferLenError::new(
+                width,
+                height,
+                pixel_elements,
+                NonZeroU8::MIN,
+            ))
+    }
+
+    /// `width * height * pixel_elements * channels` as `usize`
+    ///
+    /// The calculation is done in `u64`, so it cannot truncate on targets with a smaller `usize`
+    /// (see the assertion after this `impl`). The product of the two `u32` dimensions always fits
+    /// `u64`, only the multiplication with `pixel_elements * channels` can overflow it.
+    pub(crate) const fn flat_len_checked(
+        width: NonZeroU32,
+        height: NonZeroU32,
+        pixel_elements: NonZeroU8,
+        channels: NonZeroU8,
+    ) -> Result<usize, OverflowBufferLenError> {
+        #[allow(clippy::cast_lossless)]
+        let pixels = (width.get() as u64) * (height.get() as u64);
+        #[allow(clippy::cast_lossless)]
+        let elements_per_pixel = (pixel_elements.get() as u64) * (channels.get() as u64);
+        match pixels.checked_mul(elements_per_pixel) {
+            Some(len) if len <= usize::MAX as u64 => {
+                // The value is checked above to fit into `usize`
+                #[allow(clippy::cast_possible_truncation)]
+                Ok(len as usize)
+            }
+            _ => Err(OverflowBufferLenError::new(
+                width,
+                height,
+                pixel_elements,
+                channels,
+            )),
+        }
     }
 }
+
+// `usize as u64` is only lossless, if `usize` doesn't exceed 8 bytes
+const _: () = assert!(size_of::<usize>() <= size_of::<u64>());
 
 // Borrowed channels have to be dropped while 'a is alive, as the vtable might access the buffer
 impl Drop for DynamicImageChannelView<'_> {
@@ -472,12 +600,12 @@ impl Clone for DynamicImageChannelView<'_> {
     }
 }
 
-/// Channels are equal, if their dimensions, `pixel_elements`, `primitive_size` and bytes are equal
+/// Channels are equal, if their dimensions, `pixel_elements`, `bytes_per_primitive` and bytes are equal
 impl PartialEq for DynamicImageChannelView<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.dimensions() == other.dimensions()
             && self.pixel_elements() == other.pixel_elements()
-            && self.primitive_size() == other.primitive_size()
+            && self.bytes_per_primitive() == other.bytes_per_primitive()
             && self.buffer_flat_bytes() == other.buffer_flat_bytes()
     }
 }
@@ -487,7 +615,7 @@ impl Debug for DynamicImageChannelView<'_> {
         f.debug_struct("DynamicImageChannel")
             .field("width", &self.width())
             .field("height", &self.height())
-            .field("primitive_size", &self.primitive_size())
+            .field("bytes_per_primitive", &self.bytes_per_primitive())
             .field("pixel_elements", &self.pixel_elements())
             .finish()
     }
@@ -512,192 +640,27 @@ where
     }
 }
 
-#[non_exhaustive]
-#[derive(Debug, thiserror::Error)]
-#[error("IncompatibleImageError: {image:?} {reason:?}")]
-pub struct IncompatibleImageError<TInput> {
-    pub image: TInput,
-    #[allow(dead_code)]
-    pub(crate) reason: IncompatibleImageErrorReason,
-}
-
-/// Error of [`DynamicImageChannelView::ensure_valid_flat_len`]
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum InvalidLenError {
-    #[error(transparent)]
-    Overflow(#[from] OverflowBufferLenError),
-    /// The buffer length doesn't match `width * height * pixel_elements`
-    #[error("The buffer length doesn't match the dimensions")]
-    BufferMismatch,
-}
-
-#[derive(Debug, thiserror::Error, PartialEq, Eq, Clone)]
-#[error("The multiplication of the dimensions overflows `usize`")]
-pub struct OverflowBufferLenError {
-    width: NonZeroU32,
-    height: NonZeroU32,
-    pixel_elements: NonZeroU8,
-}
-
-/// `width * height * pixel_elements` as `usize`, or `None`, if the multiplication overflows
-///
-/// The calculation is done in `u64`, so it cannot truncate on targets with a smaller `usize`
-/// (see the assertion below). The product of the two `u32` dimensions always fits `u64`, only
-/// the multiplication with `pixel_elements` can overflow it.
-pub(crate) const fn flat_len_checked(
-    width: NonZeroU32,
-    height: NonZeroU32,
-    pixel_elements: NonZeroU8,
-) -> Result<usize, OverflowBufferLenError> {
-    #[allow(clippy::cast_lossless)]
-    let packed = (width.get() as u64) * (height.get() as u64);
-    #[allow(clippy::cast_lossless)]
-    match packed.checked_mul(pixel_elements.get() as u64) {
-        Some(len) if len <= usize::MAX as u64 => {
-            // The value is checked above to fit into `usize`
-            #[allow(clippy::cast_possible_truncation)]
-            Ok(len as usize)
-        }
-        _ => Err(OverflowBufferLenError {
-            width,
-            height,
-            pixel_elements,
-        }),
-    }
-}
-
-// `usize as u64` is only lossless, if `usize` doesn't exceed 8 bytes
-const _: () = assert!(size_of::<usize>() <= size_of::<u64>());
-
-#[derive(Debug)]
-#[allow(dead_code)]
-pub(crate) enum IncompatibleImageErrorReason {
-    // Todo: Rename me to something more descriptive
-    Comptime {
-        pixel_dimensions: NonZeroU8,
-        pixel_kind: &'static str,
-        buffer_dimensions: NonZeroUsize,
-    },
-    MixedImageSizes {
-        a: (NonZeroU32, NonZeroU32),
-        b: (NonZeroU32, NonZeroU32),
-    },
-    RequiresMoreChannels {
-        expected: NonZeroU8,
-        actual: NonZeroU8,
-    },
-}
-
 impl<'a, T: PixelType, const CHANNELS: usize> TryFrom<DynamicImageView<'a>>
     for ImageView<'a, T, CHANNELS>
 where
     T::Primitive: Pod,
 {
-    type Error = IncompatibleImageError<DynamicImageView<'a>>;
+    type Error = IncompatibleImage<DynamicImageView<'a>>;
 
     fn try_from(value: DynamicImageView<'a>) -> Result<Self, Self::Error> {
-        let mut value = value.channels.into_iter();
-        let mut incompatible_image = Ok(());
-        let mut prev_image_size = None;
-
-        let all: [_; CHANNELS] = std::array::from_fn(|i| {
-            if incompatible_image.is_ok() {
-                incompatible_image = Err((
-                    i,
-                    match value.next() {
-                        Some(dynamic) => match ImageChannelView::try_from(dynamic) {
-                            Ok(typed) => {
-                                let b = typed.dimensions();
-                                match prev_image_size {
-                                    Some(a) if a != b => (
-                                        Some(typed.into()),
-                                        IncompatibleImageErrorReason::MixedImageSizes { a, b },
-                                    ),
-                                    _ => {
-                                        prev_image_size = Some(typed.dimensions());
-                                        return MaybeUninit::new(typed);
-                                    }
-                                }
-                            }
-                            Err(dynamic) => (
-                                Some(dynamic),
-                                IncompatibleImageErrorReason::Comptime {
-                                    pixel_dimensions: T::ELEMENTS,
-                                    pixel_kind: std::any::type_name::<T>(),
-                                    buffer_dimensions: const { NonZeroUsize::new(CHANNELS).unwrap() },
-                                },
-                            ),
-                        },
-                        None => (
-                            None,
-                            IncompatibleImageErrorReason::RequiresMoreChannels {
-                                expected: const { crate::unwrap_usize_to_nonzero_u8(CHANNELS) },
-                                actual: crate::unwrap_usize_to_nonzero_u8(i),
-                            },
-                        ),
-                    },
-                ));
-            }
-            MaybeUninit::uninit()
-        });
-        match incompatible_image {
-            Ok(()) => Ok(all
-                .map(|x| unsafe { x.assume_init() })
-                .try_into()
-                .expect("Preconditions are checked already")),
-            Err((initialized_indices, (error_image, reason))) => Err(IncompatibleImageError {
-                image: DynamicImageView {
-                    channels: all
-                        .into_iter()
-                        .take(initialized_indices)
-                        .map(|x| unsafe { x.assume_init() }.into())
-                        .chain(error_image)
-                        .chain(value)
-                        .collect(),
-                },
-                reason,
-            }),
+        if let Err(error) = value.ensure_compatible::<T, CHANNELS>() {
+            return Err(IncompatibleImage {
+                image: value,
+                error,
+            });
         }
-    }
-}
-
-impl<'a> DynamicImageView<'a> {
-    /// Casts the first `CHANNELS` channels and checks, that their dimensions match
-    fn try_cast_channels<T: PixelType, const CHANNELS: usize>(
-        &self,
-    ) -> Result<[&ImageChannelView<'a, T>; CHANNELS], IncompatibleImageErrorReason>
-    where
-        T::Primitive: Pod,
-    {
-        let mut result = Ok(());
-        let mut iter = self.channels.iter();
-        let channels = std::array::from_fn(|i| {
-            if result.is_ok() {
-                result = if let Some(next) = iter.next() {
-                    match next.try_cast::<T>() {
-                        Some(typed) => {
-                            return MaybeUninit::new(typed);
-                        }
-                        None => Err(IncompatibleImageErrorReason::Comptime {
-                            pixel_dimensions: T::ELEMENTS,
-                            pixel_kind: std::any::type_name::<T>(),
-                            buffer_dimensions: const { NonZeroUsize::new(CHANNELS).unwrap() },
-                        }),
-                    }
-                } else {
-                    Err(IncompatibleImageErrorReason::RequiresMoreChannels {
-                        expected: const { crate::unwrap_usize_to_nonzero_u8(CHANNELS) },
-                        actual: crate::unwrap_usize_to_nonzero_u8(i),
-                    })
-                }
-            }
-            MaybeUninit::uninit()
+        let mut iter = value.channels.into_iter();
+        let channels = std::array::from_fn(|_| {
+            let channel = iter.next().expect("The channel count is checked above");
+            // Safety: Size, alignment and pixel_elements are checked above. Pod accepts any bit pattern
+            unsafe { ImageChannelView::from_dynamic_unchecked(channel) }
         });
-        result?;
-        // Safety: All channels are initialized, as result is Ok
-        let channels = channels.map(|x| unsafe { x.assume_init() });
-        crate::image::check_dimensions(channels.iter().map(|x| x.dimensions()))?;
-        Ok(channels)
+        Ok(ImageView::from_channels_unchecked(channels))
     }
 }
 
@@ -708,18 +671,17 @@ impl<'a, 'b, T: PixelType, const CHANNELS: usize> TryFrom<&'b DynamicImageView<'
 where
     T::Primitive: Pod,
 {
-    type Error = IncompatibleImageError<&'b DynamicImageView<'a>>;
+    type Error = IncompatibleImageError;
 
     fn try_from(value: &'b DynamicImageView<'a>) -> Result<Self, Self::Error> {
-        match value.try_cast_channels::<T, CHANNELS>() {
-            Ok(channels) => Ok(ImageView::from_channels_unchecked(
-                channels.map(ImageChannelView::view),
-            )),
-            Err(reason) => Err(IncompatibleImageError {
-                image: value,
-                reason,
-            }),
-        }
+        value.ensure_compatible::<T, CHANNELS>()?;
+        let mut iter = value.channels.iter();
+        let channels = std::array::from_fn(|_| {
+            let channel = iter.next().expect("The channel count is checked above");
+            // Safety: Size, alignment and pixel_elements are checked above. Pod accepts any bit pattern
+            unsafe { ImageChannelView::<T>::from_dynamic_ref_unchecked(channel) }.view()
+        });
+        Ok(ImageView::from_channels_unchecked(channels))
     }
 }
 
@@ -730,22 +692,15 @@ impl<'a, 'b, T: PixelType, const CHANNELS: usize> TryFrom<&'b mut DynamicImageVi
 where
     T::Primitive: Pod,
 {
-    type Error = IncompatibleImageError<&'b mut DynamicImageView<'a>>;
+    type Error = IncompatibleImageError;
 
     fn try_from(value: &'b mut DynamicImageView<'a>) -> Result<Self, Self::Error> {
-        // Validate with a shared borrow, so `value` can be returned in the error
-        if let Err(reason) = value.try_cast_channels::<T, CHANNELS>() {
-            return Err(IncompatibleImageError {
-                image: value,
-                reason,
-            });
-        }
+        value.ensure_compatible::<T, CHANNELS>()?;
         let mut iter = value.channels.iter_mut();
         let channels = std::array::from_fn(|_| {
-            iter.next()
-                .and_then(DynamicImageChannelView::try_cast_mut)
-                .expect("Channels are checked above")
-                .view_mut()
+            let channel = iter.next().expect("The channel count is checked above");
+            // Safety: Size, alignment and pixel_elements are checked above. Pod accepts any bit pattern
+            unsafe { ImageChannelView::<T>::from_dynamic_mut_unchecked(channel) }.view_mut()
         });
         Ok(ImageView::from_channels_unchecked(channels))
     }
@@ -753,23 +708,32 @@ where
 
 #[cfg(test)]
 mod tests {
+    use assert_matches::assert_matches;
     use std::num::{NonZeroU8, NonZeroU32};
+
+    use testresult::TestResult;
 
     use super::*;
     use crate::{Image, ImageChannel, ImageView};
 
+    const NZ_1: NonZeroU32 = NonZeroU32::MIN;
+    const NZ_2: NonZeroU32 = NonZeroU32::new(2).unwrap();
+    const NZ_3: NonZeroU32 = NonZeroU32::new(3).unwrap();
+    const NZ_U8_2: NonZeroU8 = NonZeroU8::new(2).unwrap();
+    const NZ_U8_3: NonZeroU8 = NonZeroU8::new(3).unwrap();
+
     #[test]
     fn ensure_valid_flat_len() {
-        let two = NonZeroU32::new(2).unwrap();
-        let three = NonZeroU32::new(3).unwrap();
-        let two_elements = NonZeroU8::new(2).unwrap();
         assert_eq!(
-            DynamicImageChannelView::ensure_valid_flat_len(two, three, two_elements, 12),
+            DynamicImageChannelView::ensure_valid_flat_len(NZ_2, NZ_3, NZ_U8_2, 12),
             Ok(())
         );
         assert_eq!(
-            DynamicImageChannelView::ensure_valid_flat_len(two, three, two_elements, 11),
-            Err(InvalidLenError::BufferMismatch)
+            DynamicImageChannelView::ensure_valid_flat_len(NZ_2, NZ_3, NZ_U8_2, 11),
+            Err(InvalidLenError::BufferMismatch {
+                expected: 12,
+                actual: 11
+            })
         );
         // The multiplication with `pixel_elements` overflows even `u64` (on any target)
         assert_eq!(
@@ -779,151 +743,165 @@ mod tests {
                 NonZeroU8::MAX,
                 usize::MAX
             ),
-            Err(InvalidLenError::Overflow(OverflowBufferLenError {
-                width: NonZeroU32::MAX,
-                height: NonZeroU32::MAX,
-                pixel_elements: NonZeroU8::MAX
-            }))
+            Err(InvalidLenError::Overflow(OverflowBufferLenError::new(
+                NonZeroU32::MAX,
+                NonZeroU32::MAX,
+                NonZeroU8::MAX,
+                NonZeroU8::MIN,
+            )))
         );
     }
 
     #[test]
-    fn ensure_valid_len() {
-        let two = NonZeroU32::new(2).unwrap();
-        let three = NonZeroU32::new(3).unwrap();
+    fn ensure_valid_len() -> TestResult {
         assert_eq!(
-            DynamicImageChannelView::ensure_valid_len(two, three, 6),
+            DynamicImageChannelView::ensure_valid_len(NZ_2, NZ_3, 6),
             Ok(())
         );
         assert_eq!(
-            DynamicImageChannelView::ensure_valid_len(two, three, 18),
-            Err(InvalidLenError::BufferMismatch)
+            DynamicImageChannelView::ensure_valid_len(NZ_2, NZ_3, 18),
+            Err(InvalidLenError::BufferMismatch {
+                expected: 6,
+                actual: 18
+            })
         );
         // `width * height` fits `u64`, but can overflow a smaller `usize` (on 64-bit targets,
         // where it fits, the buffer length mismatches instead)
         let expected = if cfg!(target_pointer_width = "64") {
-            InvalidLenError::BufferMismatch
+            InvalidLenError::BufferMismatch {
+                expected: usize::try_from(u64::from(u32::MAX) * u64::from(u32::MAX))?,
+                actual: usize::MAX,
+            }
         } else {
-            InvalidLenError::Overflow(OverflowBufferLenError {
-                width: NonZeroU32::MAX,
-                height: NonZeroU32::MAX,
-                pixel_elements: NonZeroU8::MAX,
-            })
+            InvalidLenError::Overflow(OverflowBufferLenError::new(
+                NonZeroU32::MAX,
+                NonZeroU32::MAX,
+                NonZeroU8::MIN,
+                NonZeroU8::MIN,
+            ))
         };
         assert_eq!(
             DynamicImageChannelView::ensure_valid_len(NonZeroU32::MAX, NonZeroU32::MAX, usize::MAX),
             Err(expected)
         );
+        Ok(())
     }
 
     #[test]
-    fn image_with_other_dimensions_is_not_uniform() {
-        let ch1 = ImageChannel::<u8>::new_vec(
-            vec![1, 1],
-            NonZeroU32::MIN,
-            const { NonZeroU32::new(2).unwrap() },
+    fn ensure_single_channel() -> TestResult {
+        let single = DynamicImage::from(Image::<[u8; 3], 1>::new_vec(vec![[1, 2, 3]], NZ_1, NZ_1)?);
+        assert_eq!(single.ensure_single_channel(), Ok(()));
+
+        let planar = DynamicImage::from(Image::<u8, 3>::new_vec(vec![1, 2, 3], NZ_1, NZ_1)?);
+        assert_eq!(
+            planar.ensure_single_channel(),
+            Err(IncompatibleChannelCount {
+                expected: NonZeroU8::MIN,
+                actual: NonZeroUsize::new(3).ok_or("zero")?,
+            })
         );
-        let ch2 = ImageChannel::<u8>::new_vec(vec![1], NonZeroU32::MIN, NonZeroU32::MIN);
+        Ok(())
+    }
+
+    #[test]
+    fn image_with_other_dimensions_is_not_uniform() -> TestResult {
+        let ch1 = ImageChannel::<u8>::new_vec(vec![1, 1], NZ_1, NZ_2)?;
+        let ch2 = ImageChannel::<u8>::new_vec(vec![1], NZ_1, NZ_1)?;
         let dynamic = DynamicImage::from_channels(ch1.into(), [ch2.into()]);
         assert!(!dynamic.is_uniform());
+        Ok(())
     }
 
     #[test]
-    fn image_with_other_primitive_size_is_not_uniform() {
-        let ch1 = ImageChannel::<u8>::new_vec(vec![1], NonZeroU32::MIN, NonZeroU32::MIN);
-        let ch2 = ImageChannel::<u16>::new_vec(vec![1], NonZeroU32::MIN, NonZeroU32::MIN);
+    fn image_with_other_bytes_per_primitive_is_not_uniform() -> TestResult {
+        let ch1 = ImageChannel::<u8>::new_vec(vec![1], NZ_1, NZ_1)?;
+        let ch2 = ImageChannel::<u16>::new_vec(vec![1], NZ_1, NZ_1)?;
         let dynamic = DynamicImage::from_channels(ch1.into(), [ch2.into()]);
         assert!(!dynamic.is_uniform());
+        Ok(())
     }
 
     #[test]
-    fn image_as_dynamic_is_uniform() {
-        let image = Image::<u8, 3>::new_vec(
-            vec![0, 1, 2, 3, 4, 5],
-            NonZeroU32::MIN,
-            const { NonZeroU32::new(2).unwrap() },
-        );
+    fn image_as_dynamic_is_uniform() -> TestResult {
+        let image = Image::<u8, 3>::new_vec(vec![0, 1, 2, 3, 4, 5], NZ_1, NZ_2)?;
         let dynamic = DynamicImage::from(image);
         assert!(dynamic.is_uniform());
+        Ok(())
     }
 
     #[test]
-    fn first_mapped_returns_ref() {
-        let ch = Image::<u8, 3>::new_vec(vec![1, 2, 3], NonZeroU32::MIN, NonZeroU32::MIN);
+    fn first_mapped_returns_ref() -> TestResult {
+        let ch = Image::<u8, 3>::new_vec(vec![1, 2, 3], NZ_1, NZ_1)?;
         let dynamic = DynamicImage::from(ch);
         let (first, mut rest) = dynamic.mapped_channels(DynamicImageChannel::buffer_flat_bytes);
         assert_eq!(1, first[0]);
-        assert_eq!(2, rest.next().unwrap()[0]);
-        assert_eq!(3, rest.next().unwrap()[0]);
+        assert_eq!(2, rest.next().ok_or("missing channel")?[0]);
+        assert_eq!(3, rest.next().ok_or("missing channel")?[0]);
+        Ok(())
     }
 
     #[test]
-    fn first_mapped_returns_mut() {
-        let ch = Image::<u8, 3>::new_vec(vec![1, 2, 3], NonZeroU32::MIN, NonZeroU32::MIN);
+    fn first_mapped_returns_mut() -> TestResult {
+        let ch = Image::<u8, 3>::new_vec(vec![1, 2, 3], NZ_1, NZ_1)?;
         let mut dynamic = DynamicImage::from(ch);
-        let (first, mut rest) = dynamic.mapped_channels_mut(|x| x.make_mut_flat::<u8>().unwrap());
-        first[0] = 4;
-        assert_eq!(2, rest.next().unwrap()[0]);
-        assert_eq!(3, rest.next().unwrap()[0]);
-        assert_eq!(dynamic.first().buffer_flat::<u8>(), Some(&[4][..]));
+        let (first, mut rest) = dynamic.mapped_channels_mut(|x| x.make_mut_flat::<u8>());
+        first?[0] = 4;
+        assert_eq!(2, rest.next().ok_or("missing channel")??[0]);
+        assert_eq!(3, rest.next().ok_or("missing channel")??[0]);
+        assert_eq!(dynamic.first().buffer_flat::<u8>(), Ok(&[4][..]));
+        Ok(())
     }
 
     #[test]
-    fn buffer_flat_checks_primitive_size() {
-        let channel =
-            DynamicImageChannel::new_vec(vec![[1u16, 2]], NonZeroU32::MIN, NonZeroU32::MIN);
-        assert_eq!(channel.primitive_size().get(), 2);
+    fn buffer_flat_checks_bytes_per_primitive() -> TestResult {
+        let channel = DynamicImageChannel::new_vec(vec![[1u16, 2]], NZ_1, NZ_1)?;
+        assert_eq!(channel.bytes_per_primitive().get(), 2);
         assert_eq!(channel.len_flat(), 2);
-        assert_eq!(channel.buffer_flat::<u16>(), Some(&[1, 2][..]));
-        assert_eq!(channel.buffer_flat::<u8>(), None);
-        assert_eq!(channel.buffer_flat::<f32>(), None);
+        assert_eq!(channel.buffer_flat::<u16>(), Ok(&[1, 2][..]));
+        assert_matches!(channel.buffer_flat::<u8>(), Err(_));
+        assert_matches!(channel.buffer_flat::<f32>(), Err(_));
         assert_eq!(channel.buffer_flat_bytes(), &[1, 0, 2, 0]);
+        Ok(())
     }
 
     #[test]
-    fn make_mut_flat_copies_shared_buffer() {
+    fn make_mut_flat_copies_shared_buffer() -> TestResult {
         let data = std::sync::Arc::<[u8]>::from([1].as_slice());
-        let image = Image::<u8, 1>::new_arc(data, NonZeroU32::MIN, NonZeroU32::MIN);
+        let image = Image::<u8, 1>::new_arc(data, NZ_1, NZ_1)?;
         let data_ptr = image.buffer().as_ptr();
         let mut dynamic = DynamicImage::from(image);
         let clone = dynamic.clone();
 
-        assert_eq!(dynamic[0].make_mut_flat::<u16>(), None);
-        let buffer = dynamic[0].make_mut_flat::<u8>().unwrap();
+        assert_matches!(dynamic[0].make_mut_flat::<u16>(), Err(_));
+        let buffer = dynamic[0].make_mut_flat::<u8>()?;
         buffer[0] = 2;
         assert_ne!(buffer.as_ptr(), data_ptr);
-        assert_eq!(clone.first().buffer_flat::<u8>(), Some(&[1][..]));
+        assert_eq!(clone.first().buffer_flat::<u8>(), Ok(&[1][..]));
+        Ok(())
     }
 
     #[test]
-    fn borrow_from_mut_dynamic_image() {
+    fn borrow_from_mut_dynamic_image() -> TestResult {
         let pixel_data = vec![1];
         let pixel_data_ptr = pixel_data.as_ptr() as usize;
-        let mut image = DynamicImage::from(Image::<u8, 1>::new_vec(
-            pixel_data,
-            NonZeroU32::MIN,
-            NonZeroU32::MIN,
-        ));
-        let mut image_back: ImageView<'_, u8, 1> = (&mut image).try_into().unwrap();
+        let mut image = DynamicImage::from(Image::<u8, 1>::new_vec(pixel_data, NZ_1, NZ_1)?);
+        let mut image_back: ImageView<'_, u8, 1> = (&mut image).try_into()?;
 
         assert_eq!(pixel_data_ptr, image_back.make_mut()[0].as_ptr() as usize);
         image_back.make_mut()[0][0] = 2;
         drop(image_back);
-        assert_eq!(image.first().buffer_flat::<u8>(), Some(&[2][..]));
+        assert_eq!(image.first().buffer_flat::<u8>(), Ok(&[2][..]));
+        Ok(())
     }
 
     #[test]
-    fn borrow_from_mut_dynamic_image_copies_shared_buffer_into_dynamic_image() {
+    fn borrow_from_mut_dynamic_image_copies_shared_buffer_into_dynamic_image() -> TestResult {
         let data = std::sync::Arc::<[u8]>::from([1].as_slice());
         let data_ptr = data.as_ptr();
-        let mut dynamic = DynamicImage::from(Image::<u8, 1>::new_arc(
-            data,
-            NonZeroU32::MIN,
-            NonZeroU32::MIN,
-        ));
+        let mut dynamic = DynamicImage::from(Image::<u8, 1>::new_arc(data, NZ_1, NZ_1)?);
         let clone = dynamic.clone();
 
-        let mut view = ImageView::<u8, 1>::try_from(&mut dynamic).unwrap();
+        let mut view = ImageView::<u8, 1>::try_from(&mut dynamic)?;
         assert_eq!(view.buffer().as_ptr(), data_ptr, "Reading doesn't copy");
         view.make_mut_flat()[0] = 2;
         assert_ne!(view.buffer().as_ptr(), data_ptr);
@@ -933,127 +911,164 @@ mod tests {
         assert_eq!(view_clone.buffer(), &[2], "Clones of mutable views copy");
         drop((view, view_clone));
 
-        assert_eq!(dynamic.first().buffer_flat::<u8>(), Some(&[3][..]));
-        assert_eq!(clone.first().buffer_flat::<u8>(), Some(&[1][..]));
+        assert_eq!(dynamic.first().buffer_flat::<u8>(), Ok(&[3][..]));
+        assert_eq!(clone.first().buffer_flat::<u8>(), Ok(&[1][..]));
+        Ok(())
     }
 
     #[test]
-    fn borrow_from_dynamic_image_copies_on_write() {
-        let dynamic = DynamicImage::from(Image::<u8, 2>::new_vec(
-            vec![1, 2],
-            NonZeroU32::MIN,
-            NonZeroU32::MIN,
-        ));
-        let mut view = ImageView::<u8, 2>::try_from(&dynamic).unwrap();
+    fn borrow_from_dynamic_image_copies_on_write() -> TestResult {
+        let dynamic = DynamicImage::from(Image::<u8, 2>::new_vec(vec![1, 2], NZ_1, NZ_1)?);
+        let mut view = ImageView::<u8, 2>::try_from(&dynamic)?;
         assert_eq!(
             view.buffers()[1].as_ptr(),
-            dynamic[1].buffer_flat::<u8>().unwrap().as_ptr()
+            dynamic[1].buffer_flat::<u8>()?.as_ptr()
         );
         let [_, second] = view.make_mut();
         second[0] = 3;
         assert_eq!(view.buffers(), [[1], [3]]);
-        assert_eq!(dynamic[1].buffer_flat::<u8>(), Some(&[2][..]));
+        assert_eq!(dynamic[1].buffer_flat::<u8>(), Ok(&[2][..]));
+        Ok(())
     }
 
     #[test]
-    fn borrowed_image_into_dynamic_image_and_back() {
+    fn borrowed_image_into_dynamic_image_and_back() -> TestResult {
         let mut data = [1u16, 2];
         let data_ptr = data.as_ptr();
-        let view = ImageView::<u16, 2>::new_slice_mut(&mut data, NonZeroU32::MIN, NonZeroU32::MIN);
+        let view = ImageView::<u16, 2>::new_slice_mut(&mut data, NZ_1, NZ_1)?;
         let mut dynamic = DynamicImageView::from(view);
-        dynamic[1].make_mut_flat::<u16>().unwrap()[0] = 3;
-        let back = ImageView::<u16, 2>::try_from(dynamic).unwrap();
+        dynamic[1].make_mut_flat::<u16>()?[0] = 3;
+        let back = ImageView::<u16, 2>::try_from(dynamic)?;
         assert_eq!(back.buffers()[0].as_ptr(), data_ptr);
         drop(back);
         assert_eq!(data, [1, 3]);
+        Ok(())
     }
 
     #[test]
-    fn borrow_from_different_size_mut_dynamic_image() {
-        let mut dynamic = DynamicImage::from(Image::<u8, 2>::new_vec(
-            vec![0, 1],
-            NonZeroU32::MIN,
-            NonZeroU32::MIN,
-        ));
-        dynamic[1] = ImageChannel::<u8>::new_vec(
-            vec![0, 1],
-            NonZeroU32::MIN,
-            const { NonZeroU32::new(2).unwrap() },
-        )
-        .into();
+    fn borrow_from_different_size_mut_dynamic_image() -> TestResult {
+        let mut dynamic = DynamicImage::from(Image::<u8, 2>::new_vec(vec![0, 1], NZ_1, NZ_1)?);
+        dynamic[1] = ImageChannel::<u8>::new_vec(vec![0, 1], NZ_1, NZ_2)?.into();
 
-        ImageView::<u8, 2>::try_from(&mut dynamic).unwrap_err();
-        ImageView::<u8, 2>::try_from(&dynamic).unwrap_err();
+        assert_matches!(
+            ImageView::<u8, 2>::try_from(&mut dynamic),
+            Err(IncompatibleImageError::MixedImageSizes { .. })
+        );
+        assert_matches!(
+            ImageView::<u8, 2>::try_from(&dynamic),
+            Err(IncompatibleImageError::MixedImageSizes { .. })
+        );
+        Ok(())
     }
 
     #[test]
-    fn create_from_luma_u8() {
-        let luma = Image::<u8, 1>::new_vec(vec![1], NonZeroU32::MIN, NonZeroU32::MIN);
+    fn create_from_luma_u8() -> TestResult {
+        let luma = Image::<u8, 1>::new_vec(vec![1], NZ_1, NZ_1)?;
         let dynamic = DynamicImage::from(luma);
         assert_eq!(1, dynamic.channels.len());
-        let luma_back: Image<u8, 1> = dynamic.try_into().unwrap();
+        let luma_back: Image<u8, 1> = dynamic.try_into()?;
         assert_eq!(luma_back.into_vec(), vec![1]);
+        Ok(())
     }
 
     #[test]
-    fn create_from_luma_rgb16_interleaved() {
-        let luma =
-            Image::<[u16; 3], 1>::new_vec(vec![[1u16, 2, 3]], NonZeroU32::MIN, NonZeroU32::MIN);
+    fn create_from_luma_rgb16_interleaved() -> TestResult {
+        let luma = Image::<[u16; 3], 1>::new_vec(vec![[1u16, 2, 3]], NZ_1, NZ_1)?;
         let dynamic = DynamicImage::from(luma);
         assert_eq!(1, dynamic.channels.len());
-        let luma_back: Image<[u16; 3], 1> = dynamic.try_into().unwrap();
+        let luma_back: Image<[u16; 3], 1> = dynamic.try_into()?;
         assert_eq!(luma_back.into_vec(), vec![[1u16, 2, 3]]);
+        Ok(())
     }
 
     #[test]
-    fn create_from_rgb8_interleaved() {
-        let rgb = Image::<[u8; 3], 1>::new_vec(vec![[1u8, 2, 3]], NonZeroU32::MIN, NonZeroU32::MIN);
+    fn create_from_rgb8_interleaved() -> TestResult {
+        let rgb = Image::<[u8; 3], 1>::new_vec(vec![[1u8, 2, 3]], NZ_1, NZ_1)?;
         let dynamic = DynamicImage::from(rgb);
         assert_eq!(1, dynamic.channels.len());
-        assert_eq!(1, dynamic[0].primitive_size().get());
+        assert_eq!(1, dynamic[0].bytes_per_primitive().get());
         assert_eq!(3, dynamic[0].pixel_elements().get());
-        assert_eq!(
-            Some([[1u8, 2, 3]].as_slice()),
-            dynamic[0].buffer::<[u8; 3]>()
-        );
-        let rgb_back: Image<[u8; 3], 1> = dynamic.try_into().unwrap();
+        assert_eq!(Ok([[1u8, 2, 3]].as_slice()), dynamic[0].buffer::<[u8; 3]>());
+        let rgb_back: Image<[u8; 3], 1> = dynamic.try_into()?;
         assert_eq!(rgb_back.into_vec(), vec![[1u8, 2, 3]]);
+        Ok(())
     }
     #[test]
-    fn create_from_luma_rgb8_planar() {
-        let luma = Image::<u8, 3>::new_vec(vec![1u8, 2, 3], NonZeroU32::MIN, NonZeroU32::MIN);
+    fn create_from_luma_rgb8_planar() -> TestResult {
+        let luma = Image::<u8, 3>::new_vec(vec![1u8, 2, 3], NZ_1, NZ_1)?;
         let dynamic = DynamicImage::from(luma);
         assert_eq!(3, dynamic.channels.len());
-        let luma_back: Image<u8, 3> = dynamic.try_into().unwrap();
+        let luma_back: Image<u8, 3> = dynamic.try_into()?;
         assert_eq!(luma_back.into_vec(), vec![1u8, 2, 3]);
+        Ok(())
     }
 
     #[test]
-    fn clone_dynamic_image() {
-        let width = NonZeroU32::new(2).unwrap();
-        let height = NonZeroU32::new(2).unwrap();
-        let luma = Image::<u8, 1>::new_vec(vec![1, 2, 3, 4], width, height);
+    fn clone_dynamic_image() -> TestResult {
+        let luma = Image::<u8, 1>::new_vec(vec![1, 2, 3, 4], NZ_2, NZ_2)?;
         let dynamic = DynamicImage::from(luma);
         let cloned = dynamic.clone();
 
         // Verify both can be converted back to the same image
-        let luma_back: Image<u8, 1> = dynamic.try_into().unwrap();
+        let luma_back: Image<u8, 1> = dynamic.try_into()?;
         {
-            let ref_luma: ImageView<u8, 1> = (&cloned).try_into().unwrap();
-            assert_eq!(ref_luma.dimensions(), (width, height));
+            let ref_luma: ImageView<u8, 1> = (&cloned).try_into()?;
+            assert_eq!(ref_luma.dimensions(), (NZ_2, NZ_2));
         }
-        let luma_cloned: Image<u8, 1> = cloned.try_into().unwrap();
+        let luma_cloned: Image<u8, 1> = cloned.try_into()?;
         let vec_back = luma_back.into_vec();
         let vec_cloned = luma_cloned.into_vec();
         assert_eq!(vec_back, vec_cloned);
         assert_eq!(vec_cloned, vec![1, 2, 3, 4]);
+        Ok(())
     }
 
     #[test]
-    fn create_from_incompatible_image() {
-        let luma = Image::<u8, 1>::new_vec(vec![42], NonZeroU32::MIN, NonZeroU32::MIN);
+    fn create_from_incompatible_image() -> TestResult {
+        let luma = Image::<u8, 1>::new_vec(vec![42], NZ_1, NZ_1)?;
         let dynamic = DynamicImage::from(luma.clone());
-        let incompatible = Image::<u16, 1>::try_from(dynamic).unwrap_err();
-        assert_eq!(incompatible.image, DynamicImage::from(luma));
+        assert_matches!(
+            Image::<u16, 1>::try_from(dynamic),
+            Err(IncompatibleImage {
+                image,
+                error:
+                    IncompatibleImageError::Channel(IncompatibleChannelError {
+                        actual: PixelLayout {
+                            elements: NonZeroU8::MIN,
+                            bytes_per_primitive: NonZeroUsize::MIN
+                        },
+                        required: Some(PixelLayout {
+                            elements: NonZeroU8::MIN,
+                            bytes_per_primitive: second_bytes_per_primitive
+                        }),
+                        target_pixel_type: "u16",
+                        ..
+                    }),
+                ..
+            }) if image == DynamicImage::from(luma) && second_bytes_per_primitive.get() == 2
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn create_from_image_with_other_pixel_elements() -> TestResult {
+        let rgb = Image::<[u8; 3], 1>::new_vec(vec![[1u8, 2, 3]], NZ_1, NZ_1)?;
+        let dynamic = DynamicImage::from(rgb);
+        assert_matches!(
+            ImageView::<u8, 1>::try_from(&dynamic),
+            Err(IncompatibleImageError::Channel(IncompatibleChannelError {
+                actual: PixelLayout {
+                    elements: NZ_U8_3,
+                    bytes_per_primitive: first_bytes_per_primitive
+                },
+                required: Some(PixelLayout {
+                    elements: NonZeroU8::MIN,
+                    bytes_per_primitive: NonZeroUsize::MIN
+                }),
+                aligned: true,
+                target_pixel_type: "u8",
+            })) if first_bytes_per_primitive.get() == 1
+        );
+        Ok(())
     }
 }

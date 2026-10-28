@@ -3,7 +3,7 @@ name = "imbuf-image"
 version = "0.1.0"
 authors.workspace = true
 edition.workspace = true
-rust-version = "1.88"
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Conversions between imbuf image buffers and the `image` crate, with zero-copy borrows and moves where possible."
@@ -17,4 +17,9 @@ thiserror.workspace = true
 image = { version = "0.25", default-features = false }
 
 [dev-dependencies]
+assert_matches.workspace = true
+testresult.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+[lints]
+workspace = true

@@ -1,13 +1,13 @@
 use std::{
     fmt::{self, Debug, Formatter},
-    num::NonZeroU32,
+    num::{NonZeroU8, NonZeroU32},
     sync::Arc,
 };
 
 use crate::{
-    DynamicImageChannelView, IncompatibleImageError,
+    DynamicImageChannelView, IncompatibleImage, InvalidLenError,
     channel::{ImageChannel, ImageChannelView},
-    dynamic::IncompatibleImageErrorReason,
+    error::IncompatibleImageError,
     pixel::{PixelType, PixelTypePrimitive},
     unwrap_usize_to_nonzero_u8,
 };
@@ -33,16 +33,28 @@ impl<T: PixelType, const CHANNELS: usize> PartialEq for ImageView<'_, T, CHANNEL
 
 #[allow(clippy::len_without_is_empty)]
 impl<const CHANNELS: usize, T: PixelType> Image<T, CHANNELS> {
-    /// # Panics
-    /// Panics if the buffer size is not compatible with the width and height.
-    #[must_use]
-    pub fn new_vec_flat(mut input: Vec<T::Primitive>, width: NonZeroU32, height: NonZeroU32) -> Self
+    pub fn new_vec_flat(
+        mut input: Vec<T::Primitive>,
+        width: NonZeroU32,
+        height: NonZeroU32,
+    ) -> Result<Self, InvalidLenError>
     where
         T: PixelType,
     {
+        Self::ensure_valid_flat_len(width, height, input.len())?;
+        if CHANNELS > 1 {
+            // The channels share the planar buffer, so it doesn't have to be cast to `T`
+            // Safety: The length is checked above
+            let channels = unsafe {
+                crate::shared_vec::create_shared_channels_unchecked(
+                    input,
+                    [(width, height); CHANNELS],
+                )
+            };
+            return Ok(Self(channels));
+        }
         let pixel_elements = T::ELEMENTS.get() as usize;
-        assert_eq!(input.len() % pixel_elements, 0, "Incompatible Buffer-Size");
-        if !input.capacity().is_multiple_of(pixel_elements) {
+        if input.capacity() % pixel_elements != 0 {
             // Vec<T> cannot represent the allocation. Boxed slices have an exact capacity.
             input = input.into_boxed_slice().into_vec();
         }
@@ -56,55 +68,54 @@ impl<const CHANNELS: usize, T: PixelType> Image<T, CHANNELS> {
         Self::new_vec(cast_input, width, height)
     }
 
-    /// # Panics
-    /// Panics if the buffer size is not compatible with the width and height.
-    #[must_use]
-    pub fn new_vec(input: Vec<T>, width: NonZeroU32, height: NonZeroU32) -> Self
+    pub fn new_vec(
+        input: Vec<T>,
+        width: NonZeroU32,
+        height: NonZeroU32,
+    ) -> Result<Self, InvalidLenError>
     where
         T: Clone,
     {
-        // Panic, if the multiplication of the dimensions overflows or the length mismatches,
-        // instead of comparing against a wrapped value
-        assert_eq!(
-            DynamicImageChannelView::ensure_valid_flat_len(
-                width,
-                height,
-                const { unwrap_usize_to_nonzero_u8(CHANNELS) },
-                input.len()
-            ),
-            Ok(()),
-            "Incompatible Buffer-Size"
-        );
+        Self::ensure_valid_len(width, height, input.len())?;
 
         if CHANNELS == 1 {
-            let channel = ImageChannel::<T>::new_vec(input, width, height);
+            let channel = ImageChannel::<T>::new_vec(input, width, height)?;
             unsafe {
                 let mut arr = std::mem::MaybeUninit::<[ImageChannel<T>; CHANNELS]>::uninit();
                 std::ptr::write(arr.as_mut_ptr().cast::<ImageChannel<T>>(), channel);
-                Self(arr.assume_init())
+                Ok(Self(arr.assume_init()))
             }
         } else {
             let flat_input = crate::pixel::flat_vec(input);
-            Self(crate::shared_vec::create_shared_channels(
-                flat_input,
-                [(width, height); CHANNELS],
-            ))
+            // Safety: The length is checked above to be `width * height * CHANNELS`, so the flat
+            // length is `width * height * T::ELEMENTS * CHANNELS`, which fits `usize`, as the
+            // buffer exists
+            let channels = unsafe {
+                crate::shared_vec::create_shared_channels_unchecked(
+                    flat_input,
+                    [(width, height); CHANNELS],
+                )
+            };
+            Ok(Self(channels))
         }
     }
 
     #[must_use]
+    #[allow(clippy::missing_panics_doc)]
     pub fn from_interleaved(i: &ImageView<'_, [T; CHANNELS], 1>) -> Self
     where
         T: PixelTypePrimitive + Copy,
     {
         let (width, height) = i.dimensions();
         Self::from_flat_interleaved(i.buffer_flat(), width, height)
+            .expect("The buffer of an image matches its dimensions")
     }
 
-    /// # Panics
-    /// Panics if the buffer size is not compatible with the width, height, and channel count.
-    #[must_use]
-    pub fn from_flat_interleaved(v: &[T], width: NonZeroU32, height: NonZeroU32) -> Self
+    pub fn from_flat_interleaved(
+        v: &[T],
+        width: NonZeroU32,
+        height: NonZeroU32,
+    ) -> Result<Self, InvalidLenError>
     where
         T: Copy,
     {
@@ -112,18 +123,7 @@ impl<const CHANNELS: usize, T: PixelType> Image<T, CHANNELS> {
             return Self::new_vec(v.to_vec(), width, height);
         }
 
-        // Panic, if the multiplication of the dimensions overflows or the length mismatches,
-        // instead of comparing against a wrapped value
-        assert_eq!(
-            DynamicImageChannelView::ensure_valid_flat_len(
-                width,
-                height,
-                const { unwrap_usize_to_nonzero_u8(CHANNELS) },
-                v.len()
-            ),
-            Ok(()),
-            "Incompatible Buffer-Size"
-        );
+        Self::ensure_valid_len(width, height, v.len())?;
 
         // Todo: Change interleaved to planar should be done inline instead of new vec
         let mut write_buf_container = vec![std::mem::MaybeUninit::<T>::uninit(); v.len()];
@@ -152,53 +152,67 @@ impl<const CHANNELS: usize, T: PixelType> Image<T, CHANNELS> {
     }
 }
 
+impl<T: PixelType, const CHANNELS: usize> ImageView<'_, T, CHANNELS> {
+    /// Checks that `width * height * CHANNELS` doesn't overflow `usize` and matches `len`, e.g. to
+    /// validate untrusted dimensions for a buffer of `T` with all channels (like the buffer of
+    /// [`Image::new_vec`] or [`ImageView::new_slice`]).
+    pub const fn ensure_valid_len(
+        width: NonZeroU32,
+        height: NonZeroU32,
+        len: usize,
+    ) -> Result<(), InvalidLenError> {
+        let channels = const { unwrap_usize_to_nonzero_u8(CHANNELS) };
+        DynamicImageChannelView::ensure_len(width, height, NonZeroU8::MIN, channels, len)
+    }
+
+    /// Checks that `width * height * T::ELEMENTS * CHANNELS` doesn't overflow `usize` and matches
+    /// `len`, e.g. to validate untrusted dimensions for a buffer of primitives with all channels
+    /// (like the buffer of [`Image::new_vec_flat`]).
+    pub const fn ensure_valid_flat_len(
+        width: NonZeroU32,
+        height: NonZeroU32,
+        len: usize,
+    ) -> Result<(), InvalidLenError> {
+        let channels = const { unwrap_usize_to_nonzero_u8(CHANNELS) };
+        DynamicImageChannelView::ensure_len(width, height, T::ELEMENTS, channels, len)
+    }
+}
+
 #[allow(clippy::len_without_is_empty)]
 impl<'a, T: PixelType, const CHANNELS: usize> ImageView<'a, T, CHANNELS> {
     /// Borrows the planar `input` (all pixels of the first channel, then the second...) without
     /// copying. Mutable access (e.g. [`ImageView::make_mut`]) copies the buffers, `input` stays
     /// unchanged.
-    ///
-    /// # Panics
-    /// Panics if the buffer size is not compatible with the width, height and channel count.
-    #[must_use]
-    pub fn new_slice(input: &'a [T], width: NonZeroU32, height: NonZeroU32) -> Self {
-        let mut chunks = input.chunks_exact(Self::slice_chunk_len(input.len(), width, height));
-        Self(std::array::from_fn(|_| {
+    #[allow(clippy::missing_panics_doc)]
+    pub fn new_slice(
+        input: &'a [T],
+        width: NonZeroU32,
+        height: NonZeroU32,
+    ) -> Result<Self, InvalidLenError> {
+        let len = input.len();
+        Self::ensure_valid_len(width, height, len)?;
+        let mut chunks = input.chunks_exact(len / CHANNELS);
+        Ok(Self(std::array::from_fn(|_| {
             let chunk = chunks.next().expect("Length is checked");
-            ImageChannelView::new_slice(chunk, width, height)
-        }))
+            ImageChannelView::new_slice(chunk, width, height).expect("Length is checked")
+        })))
     }
 
     /// Mutably borrows the planar `input` without copying. Mutable access
     /// (e.g. [`ImageView::make_mut`]) writes into `input`. Clones copy the buffers.
-    ///
-    /// # Panics
-    /// Panics if the buffer size is not compatible with the width, height and channel count.
-    #[must_use]
-    pub fn new_slice_mut(input: &'a mut [T], width: NonZeroU32, height: NonZeroU32) -> Self {
-        let chunk_len = Self::slice_chunk_len(input.len(), width, height);
-        let mut chunks = input.chunks_exact_mut(chunk_len);
-        Self(std::array::from_fn(|_| {
+    #[allow(clippy::missing_panics_doc)]
+    pub fn new_slice_mut(
+        input: &'a mut [T],
+        width: NonZeroU32,
+        height: NonZeroU32,
+    ) -> Result<Self, InvalidLenError> {
+        let len = input.len();
+        Self::ensure_valid_len(width, height, len)?;
+        let mut chunks = input.chunks_exact_mut(len / CHANNELS);
+        Ok(Self(std::array::from_fn(|_| {
             let chunk = chunks.next().expect("Length is checked");
-            ImageChannelView::new_slice_mut(chunk, width, height)
-        }))
-    }
-
-    fn slice_chunk_len(len: usize, width: NonZeroU32, height: NonZeroU32) -> usize {
-        // Panic, if the multiplication of the dimensions overflows or the length mismatches,
-        // instead of comparing against a wrapped value
-        assert_eq!(
-            DynamicImageChannelView::ensure_valid_flat_len(
-                width,
-                height,
-                const { unwrap_usize_to_nonzero_u8(CHANNELS) },
-                len
-            ),
-            Ok(()),
-            "Incompatible Buffer-Size"
-        );
-        // The length is checked above to be `width * height * CHANNELS`, so the division is exact
-        len / CHANNELS
+            ImageChannelView::new_slice_mut(chunk, width, height).expect("Length is checked")
+        })))
     }
 
     /// Borrows all channels without copying the buffers, see [`ImageChannelView::view`]
@@ -307,9 +321,14 @@ impl<T> Image<T, 1>
 where
     T: PixelType,
 {
-    pub fn new_arc(input: Arc<[T]>, width: NonZeroU32, height: NonZeroU32) -> Self {
-        let channel = ImageChannel::new_arc(input, width, height);
-        Self([channel])
+    // Todo: If shared_vec is extendedto support various owned slices, it could be implemented on all channel sizes too
+    pub fn new_arc(
+        input: Arc<[T]>,
+        width: NonZeroU32,
+        height: NonZeroU32,
+    ) -> Result<Self, InvalidLenError> {
+        let channel = ImageChannel::new_arc(input, width, height)?;
+        Ok(Self([channel]))
     }
 }
 
@@ -336,69 +355,48 @@ impl<'a, T: PixelType> ImageView<'a, T, 1> {
 
 impl<const PIXEL_ELEMENTS: usize, T: PixelTypePrimitive> Image<[T; PIXEL_ELEMENTS], 1> {
     #[must_use]
+    #[allow(clippy::missing_panics_doc)]
     pub fn from_planar_image<const CHANNELS: usize>(i: &ImageView<'_, T, CHANNELS>) -> Self
     where
         T: Copy,
     {
         let (width, height) = i.dimensions();
         Self::from_planar(i.buffers(), width, height)
+            .expect("The buffers of an image match its dimensions")
     }
 
-    /// # Panics
-    /// Panics if the buffer size is not compatible with the width, height, and channel count.
-    #[must_use]
+    #[allow(clippy::missing_panics_doc)]
     pub fn from_planar<const CHANNELS: usize>(
         channels: [&[T]; CHANNELS],
         width: NonZeroU32,
         height: NonZeroU32,
-    ) -> Self
+    ) -> Result<Self, InvalidLenError>
     where
         T: Copy,
     {
+        for channel in channels {
+            DynamicImageChannelView::ensure_valid_len(width, height, channel.len())?;
+        }
+
         if CHANNELS == 1 {
             let mut data_vec = Vec::with_capacity(channels[0].len());
             for &val in channels[0] {
                 data_vec.push([val; PIXEL_ELEMENTS]);
             }
-            let channel = ImageChannel::new_vec(data_vec, width, height);
+            let channel = ImageChannel::new_vec(data_vec, width, height)?;
 
-            return {
+            return Ok({
                 let mut arr =
                     std::mem::MaybeUninit::<[ImageChannel<[T; PIXEL_ELEMENTS]>; 1]>::uninit();
                 unsafe {
                     std::ptr::write(arr.as_mut_ptr().cast(), channel);
                     Self(arr.assume_init())
                 }
-            };
+            });
         }
 
-        let mut len_iter = channels.iter().map(|c| c.len());
-        let first_len = len_iter.next().unwrap();
-
-        // Panic, if the sum overflows, instead of comparing against a wrapped value
-        let total = len_iter
-            .try_fold(first_len, |acc, len| {
-                assert_eq!(len, first_len, "All channels must have the same length");
-                acc.checked_add(len)
-            })
-            .expect("The buffer length overflows usize");
-
-        // Panic, if the multiplication of the dimensions overflows or the length mismatches,
-        // instead of comparing against a wrapped value
-        assert_eq!(
-            DynamicImageChannelView::ensure_valid_flat_len(
-                width,
-                height,
-                const { unwrap_usize_to_nonzero_u8(CHANNELS) },
-                total
-            ),
-            Ok(()),
-            "Incompatible Buffer-Size"
-        );
-
-        // All channels have the same length and their sum is checked above to be
-        // `width * height * CHANNELS`, so each channel is `width * height` long
-        let len = first_len;
+        // Each channel is checked above to be `width * height` long
+        let len = channels[0].len();
         let mut channel_iters = channels.map(|c| c.iter());
 
         let mut data_vec = vec![std::mem::MaybeUninit::<[T; PIXEL_ELEMENTS]>::uninit(); len];
@@ -421,8 +419,8 @@ impl<const PIXEL_ELEMENTS: usize, T: PixelTypePrimitive> Image<[T; PIXEL_ELEMENT
         let data_vec_init: Vec<[T; PIXEL_ELEMENTS]> = unsafe { std::mem::transmute(data_vec) };
         let data = std::sync::Arc::from(data_vec_init);
 
-        let image = ImageChannel::new_arc(data, width, height);
-        Self([image])
+        let image = ImageChannel::new_arc(data, width, height)?;
+        Ok(Self([image]))
     }
 }
 
@@ -440,12 +438,12 @@ impl<T: PixelType, const CHANNELS: usize> Debug for ImageView<'_, T, CHANNELS> {
 /// Fails with `MixedImageSizes`, if not all dimensions are equal
 pub(crate) fn check_dimensions(
     mut dimensions: impl Iterator<Item = (NonZeroU32, NonZeroU32)>,
-) -> Result<(), IncompatibleImageErrorReason> {
+) -> Result<(), IncompatibleImageError> {
     let Some(a) = dimensions.next() else {
         return Ok(());
     };
     match dimensions.find(|b| a != *b) {
-        Some(b) => Err(IncompatibleImageErrorReason::MixedImageSizes { a, b }),
+        Some(b) => Err(IncompatibleImageError::MixedImageSizes { a, b }),
         None => Ok(()),
     }
 }
@@ -453,15 +451,15 @@ pub(crate) fn check_dimensions(
 impl<'a, T: PixelType, const CHANNELS: usize> TryFrom<[ImageChannelView<'a, T>; CHANNELS]>
     for ImageView<'a, T, CHANNELS>
 {
-    type Error = IncompatibleImageError<[ImageChannelView<'a, T>; CHANNELS]>;
+    type Error = IncompatibleImage<[ImageChannelView<'a, T>; CHANNELS]>;
     fn try_from(channels: [ImageChannelView<'a, T>; CHANNELS]) -> Result<Self, Self::Error> {
         let _assert_not_empty = const { unwrap_usize_to_nonzero_u8(CHANNELS) };
 
         match check_dimensions(channels.iter().map(ImageChannelView::dimensions)) {
             Ok(()) => Ok(Self(channels)),
-            Err(reason) => Err(IncompatibleImageError {
+            Err(error) => Err(IncompatibleImage {
                 image: channels,
-                reason,
+                error,
             }),
         }
     }
@@ -477,7 +475,10 @@ impl<'a, T: PixelType, const CHANNELS: usize> From<ImageView<'a, T, CHANNELS>>
 
 #[cfg(test)]
 mod tests {
+    use assert_matches::assert_matches;
     use std::num::NonZeroU32;
+
+    use testresult::TestResult;
 
     use super::*;
 
@@ -485,40 +486,47 @@ mod tests {
     const NZ_2: NonZeroU32 = NonZeroU32::new(2).unwrap();
 
     #[test]
-    fn first_channel_access() {
-        let mut image = Image::<u8, 1>::new_vec(vec![0, 1, 2, 3], NZ_2, NZ_2);
+    fn first_channel_access() -> TestResult {
+        let mut image = Image::<u8, 1>::new_vec(vec![0, 1, 2, 3], NZ_2, NZ_2)?;
         assert_eq!(image.first().dimensions(), (NZ_2, NZ_2));
         image.first_mut().make_mut_flat()[0] = 9;
         assert_eq!(image.buffer(), &[9, 1, 2, 3]);
+        Ok(())
     }
 
     #[test]
-    fn create_image_from_borrowed_channels() {
-        let size = 2.try_into().unwrap();
-        let channel = ImageChannel::<u8>::new_vec(vec![0u8, 64u8, 128u8, 192u8], size, size);
-        let image = ImageView::try_from([channel.view()]).unwrap();
-        assert_eq!(image.buffer(), &[0u8, 64u8, 128u8, 192u8]);
+    fn create_image_from_borrowed_channels() -> TestResult {
+        let channel = ImageChannel::<u8>::new_vec(vec![0u8, 64, 128, 192], NZ_2, NZ_2)?;
+        let image = ImageView::try_from([channel.view()])?;
+        assert_eq!(image.buffer(), &[0u8, 64, 128, 192]);
         assert_eq!(image.buffer().as_ptr(), channel.buffer().as_ptr());
-        assert_eq!(image.dimensions(), (size, size));
+        assert_eq!(image.dimensions(), (NZ_2, NZ_2));
         assert_eq!(image.len_per_channel(), 4);
         assert_eq!(image.len_per_channel_flat(), 4);
-        assert_eq!(image.buffers(), [[0u8, 64u8, 128u8, 192u8]]);
+        assert_eq!(image.buffers(), [[0u8, 64, 128, 192]]);
+        Ok(())
     }
 
     #[test]
-    fn create_image_from_borrowed_channels_with_different_dimensions() {
+    fn create_image_from_borrowed_channels_with_different_dimensions() -> TestResult {
         let data = [1u8, 2, 3];
-        let a = ImageChannelView::new_slice(&data[..1], NZ_1, NZ_1);
-        let b = ImageChannelView::new_slice(&data[1..], NZ_2, NZ_1);
-        let err = ImageView::try_from([a, b]).unwrap_err();
-        assert_eq!(err.image[1].buffer(), &[2, 3]);
+        let a = ImageChannelView::new_slice(&data[..1], NZ_1, NZ_1)?;
+        let b = ImageChannelView::new_slice(&data[1..], NZ_2, NZ_1)?;
+        assert_matches!(
+            ImageView::try_from([a, b]),
+            Err(IncompatibleImage {
+                image,
+                error: IncompatibleImageError::MixedImageSizes { .. },
+                ..
+            }) if image[1].buffer() == [2, 3]
+        );
+        Ok(())
     }
 
     #[test]
-    fn new_slice_borrows_planar_buffer() {
-        let two = NonZeroU32::new(2).unwrap();
+    fn new_slice_borrows_planar_buffer() -> TestResult {
         let data = [1u8, 2, 3, 4];
-        let mut image = ImageView::<u8, 2>::new_slice(&data, two, NonZeroU32::MIN);
+        let mut image = ImageView::<u8, 2>::new_slice(&data, NZ_2, NZ_1)?;
         assert_eq!(image.buffers(), [[1, 2], [3, 4]]);
         assert_eq!(image.buffers()[1].as_ptr(), data[2..].as_ptr());
 
@@ -526,31 +534,74 @@ mod tests {
         second[0] = 5;
         assert_eq!(image.buffers(), [[1, 2], [5, 4]]);
         assert_eq!(data, [1, 2, 3, 4], "The borrowed buffer is copied on write");
+        Ok(())
     }
 
     #[test]
-    fn new_slice_mut_writes_into_planar_buffer() {
-        let two = NonZeroU32::new(2).unwrap();
+    fn new_slice_mut_writes_into_planar_buffer() -> TestResult {
         let mut data = [[1u8, 2], [3, 4]];
-        let mut image = ImageView::<[u8; 2], 1>::new_slice_mut(&mut data, two, NonZeroU32::MIN);
+        let mut image = ImageView::<[u8; 2], 1>::new_slice_mut(&mut data, NZ_2, NZ_1)?;
         image.make_mut_flat()[3] = 5;
         let clone = image.clone();
         image.make_mut()[0][0][0] = 6;
         assert_eq!(clone.buffer(), &[[1, 2], [3, 5]], "Clones copy the buffer");
         drop((image, clone));
         assert_eq!(data, [[6, 2], [3, 5]]);
+        Ok(())
     }
 
     #[test]
-    #[should_panic(expected = "Incompatible Buffer-Size")]
-    fn new_slice_with_wrong_size_panics() {
-        let _ = ImageView::<u8, 2>::new_slice(&[1, 2, 3], NonZeroU32::MIN, NonZeroU32::MIN);
+    fn new_slice_with_wrong_size_fails() {
+        assert_matches!(
+            ImageView::<u8, 2>::new_slice(&[1, 2, 3], NZ_1, NZ_1),
+            Err(InvalidLenError::BufferMismatch {
+                expected: 2,
+                actual: 3
+            })
+        );
     }
 
     #[test]
-    fn view_of_owned_image() {
-        let two = NonZeroU32::new(2).unwrap();
-        let mut image = Image::<u8, 2>::new_vec(vec![1, 2, 3, 4], two, NonZeroU32::MIN);
+    fn new_vec_flat_reports_len_in_primitives() {
+        // 3 primitives are a whole pixel, but 2 pixels are required
+        assert_matches!(
+            Image::<[u8; 3], 1>::new_vec_flat(vec![1, 2, 3], NZ_2, NZ_1),
+            Err(InvalidLenError::BufferMismatch {
+                expected: 6,
+                actual: 3
+            })
+        );
+    }
+
+    #[test]
+    fn ensure_valid_len_of_image() {
+        assert_eq!(
+            ImageView::<[u8; 3], 2>::ensure_valid_len(NZ_2, NZ_1, 4),
+            Ok(())
+        );
+        assert_eq!(
+            ImageView::<[u8; 3], 2>::ensure_valid_len(NZ_2, NZ_1, 12),
+            Err(InvalidLenError::BufferMismatch {
+                expected: 4,
+                actual: 12
+            })
+        );
+        assert_eq!(
+            ImageView::<[u8; 3], 2>::ensure_valid_flat_len(NZ_2, NZ_1, 12),
+            Ok(())
+        );
+        assert_eq!(
+            ImageView::<[u8; 3], 2>::ensure_valid_flat_len(NZ_2, NZ_1, 4),
+            Err(InvalidLenError::BufferMismatch {
+                expected: 12,
+                actual: 4
+            })
+        );
+    }
+
+    #[test]
+    fn view_of_owned_image() -> TestResult {
+        let mut image = Image::<u8, 2>::new_vec(vec![1, 2, 3, 4], NZ_2, NZ_1)?;
         let ptr = image.buffers()[1].as_ptr();
         {
             let mut view = image.view();
@@ -565,89 +616,87 @@ mod tests {
             assert_eq!(view.buffers()[1].as_ptr(), ptr);
         }
         assert_eq!(image.buffers(), [[1, 2], [5, 4]]);
+        Ok(())
     }
 
     #[test]
-    fn view_of_view() {
+    fn view_of_view() -> TestResult {
         let mut data = [1u8, 2];
-        let mut image = ImageView::<u8, 1>::new_slice_mut(
-            &mut data,
-            NonZeroU32::MIN,
-            NonZeroU32::new(2).unwrap(),
-        );
+        let mut image = ImageView::<u8, 1>::new_slice_mut(&mut data, NZ_1, NZ_2)?;
         image.view_mut().view_mut().make_mut_flat()[1] = 3;
         assert_eq!(image.view().view().buffer(), &[1, 3]);
         drop(image);
         assert_eq!(data, [1, 3]);
+        Ok(())
     }
 
     /// Owned images can be used where borrowed images are expected
     #[test]
-    fn image_is_covariant() {
+    fn image_is_covariant() -> TestResult {
         fn shorten<'a>(image: Image<u8, 1>) -> ImageView<'a, u8, 1> {
             image
         }
-        let image = Image::<u8, 1>::new_vec(vec![1], NonZeroU32::MIN, NonZeroU32::MIN);
+        let image = Image::<u8, 1>::new_vec(vec![1], NZ_1, NZ_1)?;
         let data = [1u8];
-        let borrowed = ImageView::<u8, 1>::new_slice(&data, NonZeroU32::MIN, NonZeroU32::MIN);
+        let borrowed = ImageView::<u8, 1>::new_slice(&data, NZ_1, NZ_1)?;
         assert_eq!(shorten(image.clone()), borrowed);
         assert_eq!(borrowed, image);
+        Ok(())
     }
 
     #[test]
-    fn miri_create_and_clear_vec_image() {
-        let size = 2.try_into().unwrap();
-        let image = crate::Image::<u8, 1>::new_vec(vec![0u8, 64u8, 128u8, 192u8], size, size);
-        assert_eq!(image.buffers()[0], &[0u8, 64u8, 128u8, 192u8]);
-        assert_eq!(image.buffer(), &[0u8, 64u8, 128u8, 192u8]);
+    fn miri_create_and_clear_vec_image() -> TestResult {
+        let image = crate::Image::<u8, 1>::new_vec(vec![0u8, 64, 128, 192], NZ_2, NZ_2)?;
+        assert_eq!(image.buffers()[0], &[0u8, 64, 128, 192]);
+        assert_eq!(image.buffer(), &[0u8, 64, 128, 192]);
+        Ok(())
     }
 
     #[test]
-    fn from_planar_image() {
-        let two = NonZeroU32::new(2).unwrap();
-        let image = crate::Image::<u8, 3>::new_vec((0..12).collect(), two, two);
+    fn from_planar_image() -> TestResult {
+        let image = crate::Image::<u8, 3>::new_vec((0..12).collect(), NZ_2, NZ_2)?;
         let interleaved_image = crate::Image::<[u8; 3], 1>::from_planar_image(&image);
         assert_eq!(
             interleaved_image.buffer(),
             &[[0u8, 4, 8], [1, 5, 9,], [2, 6, 10,], [3, 7, 11]]
         );
-        assert_eq!(interleaved_image.dimensions(), (two, two));
+        assert_eq!(interleaved_image.dimensions(), (NZ_2, NZ_2));
+        Ok(())
     }
 
     #[test]
-    fn luma_from_planar() {
-        let two = NonZeroU32::new(2).unwrap();
-        let image = crate::Image::<u8, 1>::new_vec(vec![0u8, 64u8, 128u8, 192u8], two, two);
+    fn luma_from_planar() -> TestResult {
+        let image = crate::Image::<u8, 1>::new_vec(vec![0u8, 64, 128, 192], NZ_2, NZ_2)?;
         let planar_image = Image::<[u8; 1], 1>::from_planar_image(&image);
         assert_eq!(planar_image.buffer(), &[[0u8], [64u8], [128u8], [192u8]]);
+        Ok(())
     }
 
     #[test]
-    fn luma_from_interleaved() {
-        let two = NonZeroU32::new(2).unwrap();
+    fn luma_from_interleaved() -> TestResult {
         let interleaved_image =
-            crate::Image::from_flat_interleaved(&[0u8, 64u8, 128u8, 192u8], two, two);
-        assert_eq!(interleaved_image.buffers(), [[0u8, 64u8, 128u8, 192u8]]);
-        assert_eq!(interleaved_image.dimensions(), (two, two));
+            crate::Image::from_flat_interleaved(&[0u8, 64, 128, 192], NZ_2, NZ_2)?;
+        assert_eq!(interleaved_image.buffers(), [[0u8, 64, 128, 192]]);
+        assert_eq!(interleaved_image.dimensions(), (NZ_2, NZ_2));
+        Ok(())
     }
     #[test]
-    fn from_flat_interleaved_image() {
-        let two = NonZeroU32::new(2).unwrap();
+    fn from_flat_interleaved_image() -> TestResult {
         let image: crate::Image<u8, 3> =
-            Image::from_flat_interleaved((0..12).collect::<Vec<_>>().as_slice(), two, two);
+            Image::from_flat_interleaved((0..12).collect::<Vec<_>>().as_slice(), NZ_2, NZ_2)?;
         assert_eq!(
             image.buffers(),
             [[0u8, 3, 6, 9], [1, 4, 7, 10], [2, 5, 8, 11]]
         );
-        assert_eq!(image.dimensions(), (two, two));
+        assert_eq!(image.dimensions(), (NZ_2, NZ_2));
+        Ok(())
     }
 
     #[test]
-    fn miri_to_vec_reuses_pointer() {
-        let raw = vec![0u8, 64u8, 128u8, 192u8];
+    fn miri_to_vec_reuses_pointer() -> TestResult {
+        let raw = vec![0u8, 64, 128, 192];
         let pointer = raw[..].as_ptr();
-        let size = 2.try_into().unwrap();
-        let image = crate::Image::<u8, 1>::new_vec(raw, size, size);
+        let image = crate::Image::<u8, 1>::new_vec(raw, NZ_2, NZ_2)?;
         let to_vec = image.into_vec();
 
         // Miri seems to generate clear_vec::<const u8> for each call
@@ -660,13 +709,13 @@ mod tests {
                 "Should reuse the buffer if it was created by vec"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn miri_clone_from_box() {
-        let raw = vec![0u8, 64u8, 128u8, 192u8];
-        let size = 2.try_into().unwrap();
-        let image = crate::Image::<u8, 1>::new_vec(raw, size, size);
+    fn miri_clone_from_box() -> TestResult {
+        let raw = vec![0u8, 64, 128, 192];
+        let image = crate::Image::<u8, 1>::new_vec(raw, NZ_2, NZ_2)?;
         let image2 = image.clone();
         let to_vec = image.into_vec();
         let to_vec2 = image2.into_vec();
@@ -676,20 +725,21 @@ mod tests {
             to_vec2[..].as_ptr(),
             "Should reuse the buffer if it was created by vec"
         );
+        Ok(())
     }
 
     #[test]
-    fn create_interleaved_from_flat_vec() {
-        let size = 2.try_into().unwrap();
+    fn create_interleaved_from_flat_vec() -> TestResult {
         let image: Image<[u8; 3], 1> = Image::new_vec(
             vec![[0, 1, 2], [3, 4, 5], [6, 7, 8], [9, 10, 11]],
-            size,
-            size,
-        );
+            NZ_2,
+            NZ_2,
+        )?;
         let buffer = image.buffer_flat().to_vec();
         assert_eq!(buffer.len(), 12);
-        let image_from_flat: Image<[u8; 3], 1> = Image::new_vec_flat(buffer, size, size);
+        let image_from_flat: Image<[u8; 3], 1> = Image::new_vec_flat(buffer, NZ_2, NZ_2)?;
 
         assert_eq!(image, image_from_flat);
+        Ok(())
     }
 }
