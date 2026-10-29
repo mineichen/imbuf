@@ -6,28 +6,89 @@ use std::{
 
 use crate::{
     DynamicImageChannelView, IncompatibleImage, InvalidLenError,
-    channel::{ImageChannel, ImageChannelView},
+    channel::{ImageChannel, ImageChannelBase, ImageChannelView},
     error::IncompatibleImageError,
+    lifetime::{Borrowed, BufferLifetime, Owned},
     pixel::{PixelType, PixelTypePrimitive},
     unwrap_usize_to_nonzero_u8,
 };
 
-/// [`ImageView`] which owns its buffers (or shares them with other owners)
-pub type Image<T, const CHANNELS: usize> = ImageView<'static, T, CHANNELS>;
+/// Image, which owns its buffers (or shares them with other owners). It can be converted into an
+/// [`ImageView`] of any lifetime with `From`.
+pub type Image<T, const CHANNELS: usize> = ImageBase<Owned, T, CHANNELS>;
+
+/// Image, whose buffers are borrowed for `'a`. Borrowed images are created with
+/// [`ImageView::new_slice`], [`ImageView::view`], `TryFrom<&DynamicImageView>` and their `mut`
+/// counterparts.
+pub type ImageView<'a, T, const CHANNELS: usize> = ImageBase<Borrowed<'a>, T, CHANNELS>;
 
 /// Represents a image, where all channels share the same width, height. You usually want to use
-/// its typedef versions [`Image`] (owned) and [`ImageView`] if lifetime is not `'static` instead.
+/// its aliases [`Image`] (owns its buffers) and [`ImageView`] (borrows them for `'a`) instead.
 ///
-/// The buffers are valid for the lifetime `'a`, see [`ImageChannelView`]. Borrowed images are
-/// created with [`ImageView::new_slice`], [`ImageView::view`], `TryFrom<&DynamicImageView>`
-/// and their `mut` counterparts.
+/// `L` is the lifetime of the buffers ([`Owned`] or [`Borrowed<'a>`](Borrowed)). Code, which
+/// works with owned and borrowed images, can be generic over `L: BufferLifetime`. The same applies
+/// to [`ImageChannelBase`](crate::ImageChannelBase), [`DynamicImageBase`](crate::DynamicImageBase)
+/// and [`DynamicImageChannelBase`](crate::DynamicImageChannelBase).
+///
+/// # Why the lifetime isn't a lifetime parameter
+///
+/// A lifetime parameter would be more elegant: `ImageView<'a, T, CHANNELS>` with
+/// `Image<T, CHANNELS> = ImageView<'static, T, CHANNELS>` is a single type, owned images coerce
+/// to borrowed images by variance and code can be generic over owned and borrowed images.
+///
+/// It isn't used because of rustc bugs in the auto trait check of futures (see the tracking
+/// issue [rust-lang/rust#110338](https://github.com/rust-lang/rust/issues/110338) and
+/// [rust-lang/rust#64552](https://github.com/rust-lang/rust/issues/64552)): To prove `Send` for
+/// a future (async fn or block), rustc erases all lifetimes of the values held across `.await`,
+/// including `'static`, and requires `Send` to hold for any lifetime. If the proof depends on
+/// the lifetime, the future isn't `Send`, although the type is `Send` for every lifetime.
+/// This happens, if a closure, whose signature contains the type, is held across `.await` by an
+/// iterator or stream adapter (e.g. `map().buffer_unordered()`), which needs the closure to name
+/// its item. Generic async functions, whose output contains the type, can trigger it as well.
+/// The compiler reports errors like "implementation of `FnOnce` is not general enough" or
+/// "implementation of `Send` is not general enough".
+///
+/// It affects every type with a lifetime parameter (`&'static str` too), but owned images are
+/// typically processed in such futures, e.g. in `tokio::spawn`. Without a lifetime parameter,
+/// there is nothing to erase. If the following example compiles with a newer compiler, the bugs
+/// are fixed:
+///
+/// ```compile_fail
+/// struct View<'a>(&'a [u8]);
+///
+/// fn assert_send<T: Send>(_: T) {}
+/// assert_send(async {
+///     // `Peekable` stores `<Map<_, F> as Iterator>::Item`, so `Send` depends on the closure
+///     let mut iter = Vec::<View<'static>>::new().into_iter().map(|x| x).peekable();
+///     std::future::ready(()).await;
+///     drop(iter.next());
+/// });
+/// ```
+///
+/// The owned and borrowed aliases convert into each other with `From` (owned into any lifetime,
+/// `'static` into owned).
 #[derive(Clone)]
 #[repr(transparent)]
-pub struct ImageView<'a, T: PixelType, const CHANNELS: usize>([ImageChannelView<'a, T>; CHANNELS]);
+pub struct ImageBase<L: BufferLifetime, T: PixelType, const CHANNELS: usize>([ImageChannelBase<L, T>; CHANNELS]);
 
-impl<T: PixelType, const CHANNELS: usize> PartialEq for ImageView<'_, T, CHANNELS> {
-    fn eq(&self, other: &Self) -> bool {
+/// Owned and borrowed images can be compared
+impl<L: BufferLifetime, LOther: BufferLifetime, T: PixelType, const CHANNELS: usize> PartialEq<ImageBase<LOther, T, CHANNELS>> for ImageBase<L, T, CHANNELS> {
+    fn eq(&self, other: &ImageBase<LOther, T, CHANNELS>) -> bool {
         self.0.iter().zip(other.0.iter()).all(|(a, b)| a == b)
+    }
+}
+
+/// Owned buffers are valid for any lifetime
+impl<T: PixelType, const CHANNELS: usize> From<Image<T, CHANNELS>> for ImageView<'_, T, CHANNELS> {
+    fn from(value: Image<T, CHANNELS>) -> Self {
+        Self(value.0.map(ImageChannelView::from))
+    }
+}
+
+/// Buffers borrowed for `'static` are valid as long as the image exists
+impl<T: PixelType, const CHANNELS: usize> From<ImageView<'static, T, CHANNELS>> for Image<T, CHANNELS> {
+    fn from(value: ImageView<'static, T, CHANNELS>) -> Self {
+        Self(value.0.map(ImageChannel::from))
     }
 }
 
@@ -102,7 +163,7 @@ impl<const CHANNELS: usize, T: PixelType> Image<T, CHANNELS> {
 
     #[must_use]
     #[allow(clippy::missing_panics_doc)]
-    pub fn from_interleaved(i: &ImageView<'_, [T; CHANNELS], 1>) -> Self
+    pub fn from_interleaved<L: BufferLifetime>(i: &ImageBase<L, [T; CHANNELS], 1>) -> Self
     where
         T: PixelTypePrimitive + Copy,
     {
@@ -152,7 +213,7 @@ impl<const CHANNELS: usize, T: PixelType> Image<T, CHANNELS> {
     }
 }
 
-impl<T: PixelType, const CHANNELS: usize> ImageView<'_, T, CHANNELS> {
+impl<L: BufferLifetime, T: PixelType, const CHANNELS: usize> ImageBase<L, T, CHANNELS> {
     /// Checks that `width * height * CHANNELS` doesn't overflow `usize` and matches `len`, e.g. to
     /// validate untrusted dimensions for a buffer of `T` with all channels (like the buffer of
     /// [`Image::new_vec`] or [`ImageView::new_slice`]).
@@ -214,28 +275,31 @@ impl<'a, T: PixelType, const CHANNELS: usize> ImageView<'a, T, CHANNELS> {
             ImageChannelView::new_slice_mut(chunk, width, height).expect("Length is checked")
         })))
     }
+}
 
+#[allow(clippy::len_without_is_empty)]
+impl<L: BufferLifetime, T: PixelType, const CHANNELS: usize> ImageBase<L, T, CHANNELS> {
     /// Borrows all channels without copying the buffers, see [`ImageChannelView::view`]
     #[must_use]
     pub fn view(&self) -> ImageView<'_, T, CHANNELS> {
-        ImageView(self.0.each_ref().map(ImageChannelView::view))
+        ImageBase(self.0.each_ref().map(ImageChannelBase::view))
     }
 
     /// Mutably borrows all channels without copying the buffers, see [`ImageChannelView::view_mut`]
     #[must_use]
     pub fn view_mut(&mut self) -> ImageView<'_, T, CHANNELS> {
-        ImageView(self.0.each_mut().map(ImageChannelView::view_mut))
+        ImageBase(self.0.each_mut().map(ImageChannelBase::view_mut))
     }
 
     /// The caller has to make sure, that all channels have the same dimensions
     pub(crate) const fn from_channels_unchecked(
-        channels: [ImageChannelView<'a, T>; CHANNELS],
+        channels: [ImageChannelBase<L, T>; CHANNELS],
     ) -> Self {
         Self(channels)
     }
 
     #[must_use]
-    pub fn into_channels(self) -> [ImageChannelView<'a, T>; CHANNELS] {
+    pub fn into_channels(self) -> [ImageChannelBase<L, T>; CHANNELS] {
         self.0
     }
 
@@ -301,18 +365,18 @@ impl<'a, T: PixelType, const CHANNELS: usize> ImageView<'a, T, CHANNELS> {
 
     #[must_use]
     pub fn buffers(&self) -> [&[T]; CHANNELS] {
-        self.0.each_ref().map(ImageChannelView::buffer)
+        self.0.each_ref().map(ImageChannelBase::buffer)
     }
 
     /// Borrows the first channel (the single channel of a one-channel image).
     #[must_use]
-    pub fn first(&self) -> &ImageChannelView<'a, T> {
+    pub fn first(&self) -> &ImageChannelBase<L, T> {
         &self.0[0]
     }
 
     /// Mutably borrows the first channel (the single channel of a one-channel image).
     #[must_use]
-    pub fn first_mut(&mut self) -> &mut ImageChannelView<'a, T> {
+    pub fn first_mut(&mut self) -> &mut ImageChannelBase<L, T> {
         &mut self.0[0]
     }
 }
@@ -332,9 +396,9 @@ where
     }
 }
 
-impl<'a, T: PixelType> ImageView<'a, T, 1> {
+impl<L: BufferLifetime, T: PixelType> ImageBase<L, T, 1> {
     #[must_use]
-    pub fn from_channel(ch: ImageChannelView<'a, T>) -> Self {
+    pub fn from_channel(ch: ImageChannelBase<L, T>) -> Self {
         Self([ch])
     }
 
@@ -356,7 +420,7 @@ impl<'a, T: PixelType> ImageView<'a, T, 1> {
 impl<const PIXEL_ELEMENTS: usize, T: PixelTypePrimitive> Image<[T; PIXEL_ELEMENTS], 1> {
     #[must_use]
     #[allow(clippy::missing_panics_doc)]
-    pub fn from_planar_image<const CHANNELS: usize>(i: &ImageView<'_, T, CHANNELS>) -> Self
+    pub fn from_planar_image<L: BufferLifetime, const CHANNELS: usize>(i: &ImageBase<L, T, CHANNELS>) -> Self
     where
         T: Copy,
     {
@@ -424,7 +488,7 @@ impl<const PIXEL_ELEMENTS: usize, T: PixelTypePrimitive> Image<[T; PIXEL_ELEMENT
     }
 }
 
-impl<T: PixelType, const CHANNELS: usize> Debug for ImageView<'_, T, CHANNELS> {
+impl<L: BufferLifetime, T: PixelType, const CHANNELS: usize> Debug for ImageBase<L, T, CHANNELS> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("Image")
             .field("width", &self.width())
@@ -448,14 +512,14 @@ pub(crate) fn check_dimensions(
     }
 }
 
-impl<'a, T: PixelType, const CHANNELS: usize> TryFrom<[ImageChannelView<'a, T>; CHANNELS]>
-    for ImageView<'a, T, CHANNELS>
+impl<L: BufferLifetime, T: PixelType, const CHANNELS: usize> TryFrom<[ImageChannelBase<L, T>; CHANNELS]>
+    for ImageBase<L, T, CHANNELS>
 {
-    type Error = IncompatibleImage<[ImageChannelView<'a, T>; CHANNELS]>;
-    fn try_from(channels: [ImageChannelView<'a, T>; CHANNELS]) -> Result<Self, Self::Error> {
+    type Error = IncompatibleImage<[ImageChannelBase<L, T>; CHANNELS]>;
+    fn try_from(channels: [ImageChannelBase<L, T>; CHANNELS]) -> Result<Self, Self::Error> {
         let _assert_not_empty = const { unwrap_usize_to_nonzero_u8(CHANNELS) };
 
-        match check_dimensions(channels.iter().map(ImageChannelView::dimensions)) {
+        match check_dimensions(channels.iter().map(ImageChannelBase::dimensions)) {
             Ok(()) => Ok(Self(channels)),
             Err(error) => Err(IncompatibleImage {
                 image: channels,
@@ -465,10 +529,10 @@ impl<'a, T: PixelType, const CHANNELS: usize> TryFrom<[ImageChannelView<'a, T>; 
     }
 }
 
-impl<'a, T: PixelType, const CHANNELS: usize> From<ImageView<'a, T, CHANNELS>>
-    for [ImageChannelView<'a, T>; CHANNELS]
+impl<L: BufferLifetime, T: PixelType, const CHANNELS: usize> From<ImageBase<L, T, CHANNELS>>
+    for [ImageChannelBase<L, T>; CHANNELS]
 {
-    fn from(value: ImageView<'a, T, CHANNELS>) -> Self {
+    fn from(value: ImageBase<L, T, CHANNELS>) -> Self {
         value.0
     }
 }
@@ -491,6 +555,8 @@ mod tests {
         assert_eq!(image.first().dimensions(), (NZ_2, NZ_2));
         image.first_mut().make_mut_flat()[0] = 9;
         assert_eq!(image.buffer(), &[9, 1, 2, 3]);
+        fn ensure_send_sync<T>(_: T) {}
+        ensure_send_sync(image);
         Ok(())
     }
 
@@ -630,16 +696,21 @@ mod tests {
         Ok(())
     }
 
-    /// Owned images can be used where borrowed images are expected
+    /// Owned images can be converted into borrowed images, which are covariant
     #[test]
-    fn image_is_covariant() -> TestResult {
+    fn image_converts_into_view_of_any_lifetime() -> TestResult {
         fn shorten<'a>(image: Image<u8, 1>) -> ImageView<'a, u8, 1> {
+            image.into()
+        }
+        fn shorten_view<'a>(image: ImageView<'static, u8, 1>) -> ImageView<'a, u8, 1> {
             image
         }
         let image = Image::<u8, 1>::new_vec(vec![1], NZ_1, NZ_1)?;
         let data = [1u8];
         let borrowed = ImageView::<u8, 1>::new_slice(&data, NZ_1, NZ_1)?;
         assert_eq!(shorten(image.clone()), borrowed);
+        let shortened = shorten_view(shorten(image.clone()));
+        assert_eq!(Image::from(shortened), image);
         assert_eq!(borrowed, image);
         Ok(())
     }

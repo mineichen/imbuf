@@ -202,7 +202,7 @@ unsafe extern "C-unwind" fn clone_mat_channel<'a, P: PixelTypePrimitive + Pod>(
         Ok(cloned) => unsafe {
             // Safety: The cloned Mat keeps the buffer alive until the vtable drops it and the
             // vtable is built for `P`
-            DynamicImageChannel::from_raw_parts(
+            DynamicImageChannelView::from_raw_parts(
                 cloned.data(),
                 image.width(),
                 image.height(),
@@ -211,7 +211,7 @@ unsafe extern "C-unwind" fn clone_mat_channel<'a, P: PixelTypePrimitive + Pod>(
                 cloned.into_raw().cast::<()>(),
             )
         },
-        Err(_) => copied_channel::<P>(image),
+        Err(_) => copied_channel::<P>(image).into(),
     }
 }
 
@@ -229,7 +229,7 @@ unsafe extern "C-unwind" fn make_mat_channel_mut<P: PixelTypePrimitive + Pod>(
         Ok(owned) => unsafe {
             // Safety: The cloned Mat keeps the buffer alive until the vtable drops it and the
             // vtable is built for `P`
-            DynamicImageChannel::from_raw_parts(
+            DynamicImageChannelView::from_raw_parts(
                 owned.data(),
                 image.width(),
                 image.height(),
@@ -238,7 +238,7 @@ unsafe extern "C-unwind" fn make_mat_channel_mut<P: PixelTypePrimitive + Pod>(
                 owned.into_raw().cast(),
             )
         },
-        Err(_) => copied_channel::<P>(image),
+        Err(_) => copied_channel::<P>(image).into(),
     };
 }
 

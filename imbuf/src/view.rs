@@ -139,7 +139,8 @@ unsafe extern "C-unwind" fn copy_into_arc<T: PixelTypePrimitive>(
             image.height(),
             image.pixel_elements(),
         )
-    };
+    }
+    .into();
 }
 
 unsafe extern "C-unwind" fn noop_drop(_image: &mut DynamicImageChannelView<'_>) {

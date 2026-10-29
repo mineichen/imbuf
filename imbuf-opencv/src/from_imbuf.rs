@@ -5,7 +5,7 @@ use std::{
 
 use bytemuck::Pod;
 use imbuf::{
-    DynamicImageChannelView, DynamicImageView, ImageChannelView, ImageView,
+    BufferLifetime, DynamicImageBase, DynamicImageChannelBase, ImageBase, ImageChannelBase,
     IncompatibleChannelError, PixelType, PixelTypePrimitive,
 };
 use opencv::{
@@ -42,7 +42,7 @@ pub trait ImbufAsOpencvMut: ImbufAsOpencv {
     fn as_opencv_mut(&mut self) -> opencv::Result<BoxedRefMut<'_, Mat>>;
 }
 
-fn ensure_single_channel(image: &DynamicImageView<'_>) -> opencv::Result<()> {
+fn ensure_single_channel(image: &DynamicImageBase<impl BufferLifetime>) -> opencv::Result<()> {
     (image.len() == 1).then_some(()).ok_or_else(|| {
         opencv::Error::new(
             Code::StsUnsupportedFormat.into(),
@@ -51,20 +51,20 @@ fn ensure_single_channel(image: &DynamicImageView<'_>) -> opencv::Result<()> {
     })
 }
 
-impl ImbufAsOpencv for DynamicImageView<'_> {
+impl<L: BufferLifetime> ImbufAsOpencv for DynamicImageBase<L> {
     fn as_opencv(&self) -> opencv::Result<BoxedRef<'_, Mat>> {
         ensure_single_channel(self)?;
         self.first().as_opencv()
     }
 }
-impl ImbufAsOpencvMut for DynamicImageView<'_> {
+impl<L: BufferLifetime> ImbufAsOpencvMut for DynamicImageBase<L> {
     fn as_opencv_mut(&mut self) -> opencv::Result<BoxedRefMut<'_, Mat>> {
         ensure_single_channel(self)?;
         self[0].as_opencv_mut()
     }
 }
 
-fn unsupported_primitive(channel: &DynamicImageChannelView<'_>) -> opencv::Error {
+fn unsupported_primitive(channel: &DynamicImageChannelBase<impl BufferLifetime>) -> opencv::Error {
     opencv::Error::new(
         Code::StsUnsupportedFormat.into(),
         format!(
@@ -78,11 +78,11 @@ fn incompatible_primitive(error: &IncompatibleChannelError) -> opencv::Error {
     opencv::Error::new(Code::StsUnsupportedFormat.into(), error.to_string())
 }
 
-impl ImbufAsOpencv for DynamicImageChannelView<'_> {
+impl<L: BufferLifetime> ImbufAsOpencv for DynamicImageChannelBase<L> {
     fn as_opencv(&self) -> opencv::Result<BoxedRef<'_, Mat>> {
-        fn view<'b, P: PixelTypePrimitive + Pod + DataType>(
-            channel: &'b DynamicImageChannelView<'_>,
-        ) -> opencv::Result<BoxedRef<'b, Mat>> {
+        fn view<P: PixelTypePrimitive + Pod + DataType>(
+            channel: &DynamicImageChannelBase<impl BufferLifetime>,
+        ) -> opencv::Result<BoxedRef<'_, Mat>> {
             let flat = channel
                 .buffer_flat::<P>()
                 .map_err(|e| incompatible_primitive(&e))?;
@@ -101,11 +101,11 @@ impl ImbufAsOpencv for DynamicImageChannelView<'_> {
         }
     }
 }
-impl ImbufAsOpencvMut for DynamicImageChannelView<'_> {
+impl<L: BufferLifetime> ImbufAsOpencvMut for DynamicImageChannelBase<L> {
     fn as_opencv_mut(&mut self) -> opencv::Result<BoxedRefMut<'_, Mat>> {
-        fn view<'b, P: PixelTypePrimitive + Pod + DataType>(
-            channel: &'b mut DynamicImageChannelView<'_>,
-        ) -> opencv::Result<BoxedRefMut<'b, Mat>> {
+        fn view<P: PixelTypePrimitive + Pod + DataType>(
+            channel: &mut DynamicImageChannelBase<impl BufferLifetime>,
+        ) -> opencv::Result<BoxedRefMut<'_, Mat>> {
             let (dims, pixel_elements) = (channel.dimensions(), channel.pixel_elements());
             let flat = channel
                 .make_mut_flat::<P>()
@@ -125,7 +125,7 @@ impl ImbufAsOpencvMut for DynamicImageChannelView<'_> {
     }
 }
 
-impl<TP: PixelType> ImbufAsOpencv for ImageChannelView<'_, TP>
+impl<L: BufferLifetime, TP: PixelType> ImbufAsOpencv for ImageChannelBase<L, TP>
 where
     TP::Primitive: DataType,
 {
@@ -140,7 +140,7 @@ where
         Ok(BoxedRef::from(mat))
     }
 }
-impl<TP: PixelType> ImbufAsOpencvMut for ImageChannelView<'_, TP>
+impl<L: BufferLifetime, TP: PixelType> ImbufAsOpencvMut for ImageChannelBase<L, TP>
 where
     TP::Primitive: DataType,
 {
@@ -156,7 +156,7 @@ where
     }
 }
 
-impl<TP: PixelType> ImbufAsOpencv for ImageView<'_, TP, 1>
+impl<L: BufferLifetime, TP: PixelType> ImbufAsOpencv for ImageBase<L, TP, 1>
 where
     TP::Primitive: DataType,
 {
@@ -170,7 +170,7 @@ where
         Ok(BoxedRef::from(mat))
     }
 }
-impl<TP: PixelType> ImbufAsOpencvMut for ImageView<'_, TP, 1>
+impl<L: BufferLifetime, TP: PixelType> ImbufAsOpencvMut for ImageBase<L, TP, 1>
 where
     TP::Primitive: DataType,
 {
@@ -219,7 +219,7 @@ mod tests {
     use assert_matches::assert_matches;
     use std::num::NonZeroU32;
 
-    use imbuf::{DynamicImage, DynamicImageChannel, Image, PixelTypePrimitive};
+    use imbuf::{DynamicImage, DynamicImageChannel, Image, ImageView, PixelTypePrimitive};
     use opencv::core::{VecN, Vector};
     use opencv::prelude::{MatTraitConst, MatTraitConstManual, MatTraitManual};
     use testresult::TestResult;

@@ -77,7 +77,7 @@ unsafe extern "C-unwind" fn clone_shared_vec<'a, T: 'static, const CHANNELS: usi
     // Safety: The shared buffer stays valid until the vtable drops it and the vtable is built
     // for `T` with `CHANNELS`
     unsafe {
-        DynamicImageChannel::from_raw_parts(
+        DynamicImageChannelView::from_raw_parts(
             DynamicImageChannelView::raw_ptr(image),
             image.width(),
             image.height(),
@@ -107,7 +107,8 @@ unsafe extern "C-unwind" fn make_mut_shared_vec<T: PixelTypePrimitive, const CHA
                 channel.height(),
                 channel.pixel_elements(),
             )
-        };
+        }
+        .into();
     }
 }
 

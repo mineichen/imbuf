@@ -40,11 +40,16 @@ The `Image` struct represents a fully typed Image to support the most common ima
 
 ## Owned and borrowed images
 
-Channels and images have a lifetime `'a`, which is `'static` if they own their buffers
-([`ImageChannel`], [`Image`], [`DynamicImageChannel`], [`DynamicImage`]). Borrowed buffers are
-represented by the same types with a shorter lifetime ([`ImageChannelView`], [`ImageView`],
-[`DynamicImageChannelView`], [`DynamicImageView`]), so they can be created ad-hoc, e.g. from a
-slice of another library, without having an owned `ImageChannel` to refer to.
+Channels and images own their buffers ([`ImageChannel`], [`Image`], [`DynamicImageChannel`],
+[`DynamicImage`]) or borrow them for a lifetime `'a` ([`ImageChannelView`], [`ImageView`],
+[`DynamicImageChannelView`], [`DynamicImageView`]). Borrowed images can be created ad-hoc, e.g.
+from a slice of another library, without having an owned `ImageChannel` to refer to. Both share
+the same API. Owned images are converted into borrowed images of any lifetime with `From`
+(`ImageView::from(image)`), `'static` borrows into owned images.
+
+Owned images have no lifetime parameter, so they can be held in `Send` futures (e.g. in stream
+adapters within `tokio::spawn`). A lifetime parameter, even `'static`, triggers compiler bugs in
+the `Send` check of futures ([rust-lang/rust#110338](https://github.com/rust-lang/rust/issues/110338)).
 
 - Shared borrows (e.g. [`ImageView::new_slice`], [`ImageView::view`] or `ImageView::try_from(&dynamic)`)
   copy the buffer on mutable access (e.g. [`ImageView::make_mut`]).

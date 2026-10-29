@@ -79,7 +79,8 @@ impl<T: PixelTypePrimitive> ChannelFactory<T> for ArcFactory {
                         height,
                         pixel_elements,
                     )
-                };
+                }
+                .into();
             }
         }
         unsafe extern "C-unwind" fn clear_arc_channel<T>(image: &mut DynamicImageChannelView<'_>) {
@@ -97,6 +98,7 @@ impl<T: PixelTypePrimitive> ChannelFactory<T> for ArcFactory {
                     image.pixel_elements(),
                 )
             }
+            .into()
         }
 
         &ImageChannelVTable {
@@ -120,4 +122,5 @@ pub(crate) unsafe extern "C-unwind" fn clone_slice_into_arc_channel<'a, T: Pixel
             image.pixel_elements(),
         )
     }
+    .into()
 }

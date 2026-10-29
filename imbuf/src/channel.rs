@@ -13,16 +13,18 @@ use bytemuck::{NoUninit, Pod};
 
 use crate::{
     PixelTypePrimitive,
-    dynamic::{DynamicImageChannel, DynamicImageChannelView},
+    dynamic::{DynamicImageChannel, DynamicImageChannelBase, DynamicImageChannelView},
     error::{IncompatibleChannel, IncompatibleChannelError, InvalidLenError},
+    lifetime::{Borrowed, BufferLifetime, Owned},
     pixel::PixelType,
 };
 
 /// Represents a plane of a image. In a Planar RGB image, this could be the R, G, or B channel
 /// Interleaved RGB images have a single channel, which is a array of pixels (TP: [u8; 3])
 ///
-/// The buffer is valid for the lifetime `'a`. Channels which own their buffer (e.g. created by
-/// [`ImageChannel::new_vec`]) are `'static` (see [`ImageChannel`]). Borrowed channels are created
+/// `L` is the lifetime of the buffer. You usually want to use the aliases [`ImageChannel`] (owns its
+/// buffer, e.g. created by [`ImageChannel::new_vec`]) and [`ImageChannelView`] (borrows it for
+/// `'a`), see [`ImageBase`](crate::ImageBase), why `L` isn't a lifetime parameter. Borrowed channels are created
 /// with [`ImageChannelView::new_slice`], [`ImageChannelView::view`] and their `mut`
 /// counterparts. A borrowed channel can't outlive the buffer:
 ///
@@ -30,7 +32,7 @@ use crate::{
 /// use std::num::NonZeroU32;
 /// use imbuf::{ImageChannelView, ImageChannel};
 ///
-/// let owned: ImageChannel<u8> = {
+/// let owned: ImageChannelView<'static, u8> = {
 ///     let data = vec![1u8];
 ///     // `ImageChannelView<'_, u8>` can't be converted into `ImageChannelView<'static, u8>`
 ///     ImageChannelView::new_slice(&data, NonZeroU32::MIN, NonZeroU32::MIN).unwrap()
@@ -38,12 +40,32 @@ use crate::{
 /// ```
 // Repr transparent is important for casting between ImageChannelView and DynamicImageChannelView
 #[repr(transparent)]
-pub struct ImageChannelView<'a, TP: PixelType>(DynamicImageChannelView<'a>, PhantomData<TP>);
+pub struct ImageChannelBase<L: BufferLifetime, TP: PixelType>(DynamicImageChannelBase<L>, PhantomData<TP>);
 
-/// [`ImageChannelView`] which owns its buffer (or shares it with other owners)
-pub type ImageChannel<TP> = ImageChannelView<'static, TP>;
+/// Channel, which owns its buffer (or shares it with other owners). It can be converted into an
+/// [`ImageChannelView`] of any lifetime with `From`.
+pub type ImageChannel<TP> = ImageChannelBase<Owned, TP>;
 
-impl<TP: PixelType> Clone for ImageChannelView<'_, TP> {
+/// Channel, whose buffer is borrowed for `'a`
+pub type ImageChannelView<'a, TP> = ImageChannelBase<Borrowed<'a>, TP>;
+
+/// Owned buffers are valid for any lifetime
+impl<TP: PixelType> From<ImageChannel<TP>> for ImageChannelView<'_, TP> {
+    fn from(value: ImageChannel<TP>) -> Self {
+        // Safety: The primitive doesn't change
+        unsafe { Self::from_dynamic_unchecked(value.0.into()) }
+    }
+}
+
+/// Buffers borrowed for `'static` are valid as long as the channel exists
+impl<TP: PixelType> From<ImageChannelView<'static, TP>> for ImageChannel<TP> {
+    fn from(value: ImageChannelView<'static, TP>) -> Self {
+        // Safety: The primitive doesn't change
+        unsafe { Self::from_dynamic_unchecked(value.0.into()) }
+    }
+}
+
+impl<L: BufferLifetime, TP: PixelType> Clone for ImageChannelBase<L, TP> {
     fn clone(&self) -> Self {
         // Safety: The vtable clones the channel with the same primitive and pixel_elements
         let clone = unsafe { Self::from_dynamic_unchecked(self.0.clone()) };
@@ -54,8 +76,9 @@ impl<TP: PixelType> Clone for ImageChannelView<'_, TP> {
     }
 }
 
-impl<TP: PixelType> PartialEq for ImageChannelView<'_, TP> {
-    fn eq(&self, other: &Self) -> bool {
+/// Owned and borrowed channels can be compared
+impl<L: BufferLifetime, LOther: BufferLifetime, TP: PixelType> PartialEq<ImageChannelBase<LOther, TP>> for ImageChannelBase<L, TP> {
+    fn eq(&self, other: &ImageChannelBase<LOther, TP>) -> bool {
         self.dimensions() == other.dimensions() && self.buffer_flat() == other.buffer_flat()
     }
 }
@@ -159,7 +182,9 @@ impl<'a, TP: PixelType> ImageChannelView<'a, TP> {
         // Safety: The vtable is built for TP::Primitive with TP::ELEMENTS
         Ok(unsafe { Self::from_dynamic_unchecked(channel) })
     }
+}
 
+impl<L: BufferLifetime, TP: PixelType> ImageChannelBase<L, TP> {
     /// Borrows the channel without copying the buffer, like [`ImageChannelView::new_slice`].
     #[must_use]
     pub fn view(&self) -> ImageChannelView<'_, TP> {
@@ -174,8 +199,9 @@ impl<'a, TP: PixelType> ImageChannelView<'a, TP> {
     #[must_use]
     pub fn view_mut(&mut self) -> ImageChannelView<'_, TP> {
         let (width, height) = self.dimensions();
-        let ptr = DynamicImageChannelView::raw_ptr(&self.0);
-        let original = ptr::from_mut(&mut self.0);
+        let ptr = DynamicImageChannelBase::raw_ptr(&self.0);
+        // The layout doesn't depend on the lifetime. The vtable of the original keeps it valid
+        let original = ptr::from_mut(&mut self.0).cast::<DynamicImageChannelView<'_>>();
         // Safety: The channel is exclusively borrowed. The vtable calls its make_mut before writing
         let channel = unsafe {
             crate::view::slice_mut_channel::<TP::Primitive>(
@@ -208,7 +234,7 @@ impl<'a, TP: PixelType> ImageChannelView<'a, TP> {
         data: *mut (),
     ) -> Self {
         let channel = unsafe {
-            DynamicImageChannelView::from_raw_parts(
+            DynamicImageChannelBase::from_raw_parts(
                 ptr.cast(),
                 width,
                 height,
@@ -224,7 +250,7 @@ impl<'a, TP: PixelType> ImageChannelView<'a, TP> {
     /// # Safety
     /// `channel` must contain a valid buffer of `TP::Primitive` with `TP::ELEMENTS` per pixel
     pub(crate) const unsafe fn from_dynamic_unchecked(
-        channel: DynamicImageChannelView<'a>,
+        channel: DynamicImageChannelBase<L>,
     ) -> Self {
         Self(channel, PhantomData)
     }
@@ -233,8 +259,9 @@ impl<'a, TP: PixelType> ImageChannelView<'a, TP> {
     ///
     /// # Safety
     /// See [`ImageChannelView::from_dynamic_unchecked`]
+    #[allow(clippy::elidable_lifetime_names, clippy::needless_lifetimes, reason = "Only elidable for owned channels")]
     pub(crate) unsafe fn from_dynamic_ref_unchecked<'b>(
-        channel: &'b DynamicImageChannelView<'a>,
+        channel: &'b DynamicImageChannelBase<L>,
     ) -> &'b Self {
         debug_assert_eq!(Ok(()), channel.ensure_fits_pixel::<TP>());
         // Safety: `ImageChannelView` is repr(transparent) over `DynamicImageChannelView`.
@@ -246,8 +273,9 @@ impl<'a, TP: PixelType> ImageChannelView<'a, TP> {
     ///
     /// # Safety
     /// See [`ImageChannelView::from_dynamic_unchecked`]
+    #[allow(clippy::elidable_lifetime_names, clippy::needless_lifetimes, reason = "Only elidable for owned channels")]
     pub(crate) unsafe fn from_dynamic_mut_unchecked<'b>(
-        channel: &'b mut DynamicImageChannelView<'a>,
+        channel: &'b mut DynamicImageChannelBase<L>,
     ) -> &'b mut Self {
         debug_assert_eq!(Ok(()), channel.ensure_fits_pixel::<TP>());
         // Safety: See `from_dynamic_ref_unchecked`
@@ -320,15 +348,15 @@ impl<'a, TP: PixelType> ImageChannelView<'a, TP> {
 
     #[must_use]
     pub fn into_vec_flat(self) -> Vec<TP::Primitive> {
-        let vtable = DynamicImageChannelView::raw_vtable(&self.0);
+        let vtable = DynamicImageChannelBase::raw_vtable(&self.0);
         let vec_drop: unsafe extern "C-unwind" fn(&mut DynamicImageChannelView<'_>) =
             crate::vec::drop_vec_channel::<TP::Primitive>;
         // Check if this is a Vec-backed channel
         if ptr::fn_addr_eq(vtable.drop, vec_drop) {
-            let ptr = DynamicImageChannelView::raw_ptr(&self.0)
+            let ptr = DynamicImageChannelBase::raw_ptr(&self.0)
                 .cast::<TP::Primitive>()
                 .cast_mut();
-            let capacity = DynamicImageChannelView::raw_data(&self.0) as usize;
+            let capacity = DynamicImageChannelBase::raw_data(&self.0) as usize;
             let len = self.len_flat();
             mem::forget(self);
             // Safety: The Vec-vtable stores the capacity of a Vec<TP::Primitive> in data
@@ -364,13 +392,13 @@ impl<'a, TP: PixelType> ImageChannelView<'a, TP> {
     }
 }
 
-impl<'a, TP: PixelType> TryFrom<DynamicImageChannelView<'a>> for ImageChannelView<'a, TP>
+impl<L: BufferLifetime, TP: PixelType> TryFrom<DynamicImageChannelBase<L>> for ImageChannelBase<L, TP>
 where
     TP::Primitive: Pod,
 {
-    type Error = IncompatibleChannel<DynamicImageChannelView<'a>>;
+    type Error = IncompatibleChannel<DynamicImageChannelBase<L>>;
 
-    fn try_from(value: DynamicImageChannelView<'a>) -> Result<Self, Self::Error> {
+    fn try_from(value: DynamicImageChannelBase<L>) -> Result<Self, Self::Error> {
         match value.ensure_fits_pixel::<TP>() {
             // Safety: Size, alignment and pixel_elements are checked. Pod accepts any bit pattern
             Ok(()) => Ok(unsafe { Self::from_dynamic_unchecked(value) }),
@@ -382,45 +410,45 @@ where
     }
 }
 
-impl<'a, 'b, TP: PixelType> TryFrom<&'b DynamicImageChannelView<'a>>
-    for &'b ImageChannelView<'a, TP>
+impl<'b, L: BufferLifetime, TP: PixelType> TryFrom<&'b DynamicImageChannelBase<L>>
+    for &'b ImageChannelBase<L, TP>
 where
     TP::Primitive: Pod,
 {
     type Error = IncompatibleChannelError;
 
-    fn try_from(value: &'b DynamicImageChannelView<'a>) -> Result<Self, Self::Error> {
+    fn try_from(value: &'b DynamicImageChannelBase<L>) -> Result<Self, Self::Error> {
         value.ensure_fits_pixel::<TP>()?;
         // Safety: The layout is checked and Pod accepts any bit pattern
-        Ok(unsafe { ImageChannelView::from_dynamic_ref_unchecked(value) })
+        Ok(unsafe { ImageChannelBase::from_dynamic_ref_unchecked(value) })
     }
 }
 
-impl<'a, 'b, TP: PixelType> TryFrom<&'b mut DynamicImageChannelView<'a>>
-    for &'b mut ImageChannelView<'a, TP>
+impl<'b, L: BufferLifetime, TP: PixelType> TryFrom<&'b mut DynamicImageChannelBase<L>>
+    for &'b mut ImageChannelBase<L, TP>
 where
     TP::Primitive: Pod,
 {
     type Error = IncompatibleChannelError;
 
-    fn try_from(value: &'b mut DynamicImageChannelView<'a>) -> Result<Self, Self::Error> {
+    fn try_from(value: &'b mut DynamicImageChannelBase<L>) -> Result<Self, Self::Error> {
         value.ensure_fits_pixel::<TP>()?;
         // Safety: The layout is checked and Pod accepts any bit pattern
-        Ok(unsafe { ImageChannelView::from_dynamic_mut_unchecked(value) })
+        Ok(unsafe { ImageChannelBase::from_dynamic_mut_unchecked(value) })
     }
 }
 
 /// Requires `Pod`, because a `DynamicImageChannelView` can be viewed as any `Pod` primitive of the same size
-impl<'a, TP: PixelType> From<ImageChannelView<'a, TP>> for DynamicImageChannelView<'a>
+impl<L: BufferLifetime, TP: PixelType> From<ImageChannelBase<L, TP>> for DynamicImageChannelBase<L>
 where
     TP::Primitive: Pod,
 {
-    fn from(value: ImageChannelView<'a, TP>) -> Self {
+    fn from(value: ImageChannelBase<L, TP>) -> Self {
         value.0
     }
 }
 
-impl<TP: PixelType> Debug for ImageChannelView<'_, TP> {
+impl<L: BufferLifetime, TP: PixelType> Debug for ImageChannelBase<L, TP> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("ImageChannel")
             .field("width", &self.width())
@@ -444,8 +472,9 @@ impl<TP: PixelType> Debug for ImageChannelView<'_, TP> {
 /// For channels of non-`Pod` primitives (only reachable through [`ImageChannelView`]), the
 /// buffer is only valid for the primitive the vtable was built for.
 ///
-/// The functions have to work with channels of any lifetime `'a`, as owned channels can be
-/// coerced to shorter lifetimes. `'a` is alive during all calls.
+/// The functions have to work with channels of any lifetime `'a`, as owned channels are passed
+/// with the lifetime of a borrow. `'a` is alive during all calls. Channels returned by `clone` or
+/// assigned in `make_mut` have to stay valid as long as the input channel would.
 #[repr(C)]
 pub struct ImageChannelVTable {
     /// Returns a channel with the same dimensions, `pixel_elements` and content, which can be used
@@ -640,26 +669,26 @@ mod tests {
     #[test]
     fn miri_test_shared_arc_u16_channel() -> TestResult {
         let arc: Arc<[u16]> = vec![1].into();
-        test_entire_vtable(ImageChannel::<u16>::new_arc(arc, NZ_1, NZ_1)?);
+        test_entire_vtable(ImageChannel::<u16>::new_arc(arc, NZ_1, NZ_1)?.into());
         Ok(())
     }
 
     #[test]
     fn miri_test_exclusive_arc_u16_channel() -> TestResult {
-        test_entire_vtable(ImageChannel::<u16>::new_arc(vec![1u16].into(), NZ_1, NZ_1)?);
+        test_entire_vtable(ImageChannel::<u16>::new_arc(vec![1u16].into(), NZ_1, NZ_1)?.into());
         Ok(())
     }
 
     #[test]
     fn miri_test_vec_u16_channel() -> TestResult {
-        test_entire_vtable(ImageChannel::<u16>::new_vec(vec![1u16], NZ_1, NZ_1)?);
+        test_entire_vtable(ImageChannel::<u16>::new_vec(vec![1u16], NZ_1, NZ_1)?.into());
         Ok(())
     }
 
     #[test]
     fn miri_test_vec_rgb16_channel() -> TestResult {
         let ch = ImageChannel::<[u16; 3]>::new_vec(vec![[1u16, 2, 3]], NZ_1, NZ_1)?;
-        test_entire_vtable(ch);
+        test_entire_vtable(ch.into());
         Ok(())
     }
 

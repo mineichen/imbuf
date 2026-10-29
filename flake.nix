@@ -95,14 +95,18 @@
           policy = pkgs.writeText "policy.json" ''{"default":[{"type":"insecureAcceptAnything"}]}'';
           containername = "imbuf-isolated-dev";
           podmanRuntimePath = pkgs.lib.makeBinPath [
-            pkgs.slirp4netns
+            pkgs.passt
           ];
-          podmanRun = "${pkgs.podman}/bin/podman run --rm -it "
-            + "--network=slirp4netns "
-            + "--tmpfs /tmp "
-            + "-v .:/workspace/imbuf:z "
-            + "-e HOME=/root "
-            + "${containername}:latest /bin/entrypoint.sh";
+          podmanRun = ''
+            workspace="$(realpath "''${1:-.}")"
+            exec ${pkgs.podman}/bin/podman run --rm -it \
+              --network=pasta \
+              --tmpfs /tmp \
+              -v "$workspace:/workspace:z" \
+              -w "/workspace/$(basename "$workspace")" \
+              -e HOME=/root \
+              ${containername}:latest /bin/entrypoint.sh
+          '';
         in
         {
           devShells.default = pkgs.mkShell ({
