@@ -364,21 +364,47 @@ impl<'a, TP: PixelType> ImageChannelView<'a, TP> {
     }
 }
 
-impl<'a, TP: PixelType> TryFrom<DynamicImageChannelView<'a>> for ImageChannelView<'a, TP>
+/// Hands back the input in [`IncompatibleChannel`], if it can't be converted. Use `TryFrom`, if the
+/// input isn't needed on failure.
+impl<'a, TP: PixelType> From<DynamicImageChannelView<'a>>
+    for Result<ImageChannelView<'a, TP>, IncompatibleChannel<DynamicImageChannelView<'a>>>
 where
     TP::Primitive: Pod,
 {
-    type Error = IncompatibleChannel<DynamicImageChannelView<'a>>;
-
-    fn try_from(value: DynamicImageChannelView<'a>) -> Result<Self, Self::Error> {
+    fn from(value: DynamicImageChannelView<'a>) -> Self {
         match value.ensure_fits_pixel::<TP>() {
             // Safety: Size, alignment and pixel_elements are checked. Pod accepts any bit pattern
-            Ok(()) => Ok(unsafe { Self::from_dynamic_unchecked(value) }),
+            Ok(()) => Ok(unsafe { ImageChannelView::from_dynamic_unchecked(value) }),
             Err(error) => Err(IncompatibleChannel {
                 channel: value,
                 error,
             }),
         }
+    }
+}
+
+/// Drops the input on failure. To get it back, convert into
+/// `Result<ImageChannelView, IncompatibleChannel<DynamicImageChannelView>>` with `From`/`Into`
+/// instead:
+///
+/// ```
+/// use std::num::NonZeroU32;
+/// use imbuf::{DynamicImageChannel, ImageChannel, IncompatibleChannel};
+///
+/// let dynamic = DynamicImageChannel::new_vec(vec![42u8], NonZeroU32::MIN, NonZeroU32::MIN).unwrap();
+/// let result: Result<ImageChannel<u16>, IncompatibleChannel<DynamicImageChannel>> = dynamic.into();
+/// let IncompatibleChannel { channel, error, .. } = result.unwrap_err();
+/// assert_eq!(ImageChannel::<u8>::try_from(channel).unwrap().buffer(), &[42]);
+/// println!("{error}");
+/// ```
+impl<'a, TP: PixelType> TryFrom<DynamicImageChannelView<'a>> for ImageChannelView<'a, TP>
+where
+    TP::Primitive: Pod,
+{
+    type Error = IncompatibleChannelError;
+
+    fn try_from(value: DynamicImageChannelView<'a>) -> Result<Self, Self::Error> {
+        Result::<Self, IncompatibleChannel<_>>::from(value).map_err(|e| e.error)
     }
 }
 
@@ -504,11 +530,17 @@ mod tests {
     fn try_from_dynamic_channel_checks_primitive_and_pixel_elements() -> TestResult {
         let dynamic = DynamicImageChannel::from(ImageChannel::<u16>::new_vec(vec![1], NZ_1, NZ_1)?);
 
-        let dynamic = ImageChannel::<u8>::try_from(dynamic).unwrap_err().channel;
-        let dynamic = ImageChannel::<[u8; 2]>::try_from(dynamic)
+        assert_matches!(
+            ImageChannel::<u8>::try_from(dynamic.clone()),
+            Err(IncompatibleChannelError { .. })
+        );
+        let dynamic = Result::<ImageChannel<u8>, IncompatibleChannel<_>>::from(dynamic)
             .unwrap_err()
             .channel;
-        let dynamic = ImageChannel::<[u16; 2]>::try_from(dynamic)
+        let dynamic = Result::<ImageChannel<[u8; 2]>, IncompatibleChannel<_>>::from(dynamic)
+            .unwrap_err()
+            .channel;
+        let dynamic = Result::<ImageChannel<[u16; 2]>, IncompatibleChannel<_>>::from(dynamic)
             .unwrap_err()
             .channel;
         let typed = ImageChannel::<u16>::try_from(dynamic)?;

@@ -640,14 +640,14 @@ where
     }
 }
 
-impl<'a, T: PixelType, const CHANNELS: usize> TryFrom<DynamicImageView<'a>>
-    for ImageView<'a, T, CHANNELS>
+/// Hands back the input in [`IncompatibleImage`], if it can't be converted. Use `TryFrom`, if the
+/// input isn't needed on failure.
+impl<'a, T: PixelType, const CHANNELS: usize> From<DynamicImageView<'a>>
+    for Result<ImageView<'a, T, CHANNELS>, IncompatibleImage<DynamicImageView<'a>>>
 where
     T::Primitive: Pod,
 {
-    type Error = IncompatibleImage<DynamicImageView<'a>>;
-
-    fn try_from(value: DynamicImageView<'a>) -> Result<Self, Self::Error> {
+    fn from(value: DynamicImageView<'a>) -> Self {
         if let Err(error) = value.ensure_compatible::<T, CHANNELS>() {
             return Err(IncompatibleImage {
                 image: value,
@@ -661,6 +661,32 @@ where
             unsafe { ImageChannelView::from_dynamic_unchecked(channel) }
         });
         Ok(ImageView::from_channels_unchecked(channels))
+    }
+}
+
+/// Drops the input on failure. To get it back, convert into
+/// `Result<ImageView, IncompatibleImage<DynamicImageView>>` with `From`/`Into` instead:
+///
+/// ```
+/// use std::num::NonZeroU32;
+/// use imbuf::{DynamicImage, Image, IncompatibleImage};
+///
+/// let luma = Image::<u8, 1>::new_vec(vec![42], NonZeroU32::MIN, NonZeroU32::MIN).unwrap();
+/// let result: Result<Image<u16, 1>, IncompatibleImage<DynamicImage>> =
+///     DynamicImage::from(luma).into();
+/// let IncompatibleImage { image, error, .. } = result.unwrap_err();
+/// assert_eq!(Image::<u8, 1>::try_from(image).unwrap().buffer(), &[42]);
+/// println!("{error}");
+/// ```
+impl<'a, T: PixelType, const CHANNELS: usize> TryFrom<DynamicImageView<'a>>
+    for ImageView<'a, T, CHANNELS>
+where
+    T::Primitive: Pod,
+{
+    type Error = IncompatibleImageError;
+
+    fn try_from(value: DynamicImageView<'a>) -> Result<Self, Self::Error> {
+        Result::<Self, IncompatibleImage<_>>::from(value).map_err(|e| e.error)
     }
 }
 
@@ -1028,7 +1054,11 @@ mod tests {
         let luma = Image::<u8, 1>::new_vec(vec![42], NZ_1, NZ_1)?;
         let dynamic = DynamicImage::from(luma.clone());
         assert_matches!(
-            Image::<u16, 1>::try_from(dynamic),
+            Image::<u16, 1>::try_from(dynamic.clone()),
+            Err(IncompatibleImageError::Channel(_))
+        );
+        assert_matches!(
+            Result::<Image<u16, 1>, IncompatibleImage<_>>::from(dynamic),
             Err(IncompatibleImage {
                 image,
                 error:

@@ -6,8 +6,11 @@ use std::{
 
 use crate::{PixelType, PixelTypePrimitive};
 
-/// Returned by the conversions of owned images (e.g. into [`Image`](crate::Image)), which hand
-/// back the input in `image` if it is incompatible. As the input is returned, it doesn't
+/// Returned by conversions of owned images, which hand back the input in `image` if it is
+/// incompatible: Converting a [`DynamicImageView`](crate::DynamicImageView) into
+/// `Result<ImageView, IncompatibleImage<DynamicImageView>>` with `From`/`Into` (`TryFrom` only
+/// returns the [`IncompatibleImageError`]) and `TryFrom<[ImageChannelView; N]> for ImageView`.
+/// As the input is returned, it doesn't
 /// implement `Error` (but `Display`). Use [`IncompatibleImage::into_error`] (e.g. in `map_err`)
 /// to propagate the cause, or destructure it to get both the image and the cause.
 #[non_exhaustive]
@@ -33,8 +36,10 @@ impl<TInput> Display for IncompatibleImage<TInput> {
     }
 }
 
-/// Returned by the conversions of owned channels (e.g. into [`ImageChannel`](crate::ImageChannel)),
-/// which hand back the input in `channel` if it is incompatible. As the input is returned, it
+/// Returned by converting a [`DynamicImageChannelView`](crate::DynamicImageChannelView) into
+/// `Result<ImageChannelView, IncompatibleChannel<DynamicImageChannelView>>` with `From`/`Into`
+/// (`TryFrom` only returns the [`IncompatibleChannelError`]), which hands back the input in
+/// `channel` if it is incompatible. As the input is returned, it
 /// doesn't implement `Error` (but `Display`). Use [`IncompatibleChannel::into_error`] (e.g. in
 /// `map_err`) to propagate the cause, or destructure it to get both the channel and the cause.
 #[non_exhaustive]

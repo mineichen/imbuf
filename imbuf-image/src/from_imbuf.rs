@@ -2,8 +2,7 @@ use std::num::{NonZeroU8, NonZeroUsize};
 
 use image::ImageBuffer;
 use imbuf::{
-    Image, ImageChannel, IncompatibleChannelError, IncompatibleImage, IncompatibleImageError,
-    PixelLayout, PixelType,
+    Image, ImageChannel, IncompatibleChannelError, IncompatibleImageError, PixelLayout, PixelType,
 };
 
 use crate::ref_image::{DynamicRefImage, DynamicRefImageMut};
@@ -269,10 +268,10 @@ impl ImbufIntoImage for imbuf::DynamicImage {
         ) -> Result<image::DynamicImage, IncompatibleImageError>
         where
             TP: PixelType,
-            Image<TP, 1>: TryFrom<imbuf::DynamicImage, Error = IncompatibleImage<imbuf::DynamicImage>>
+            Image<TP, 1>: TryFrom<imbuf::DynamicImage, Error = IncompatibleImageError>
                 + ImbufIntoImage<Result = image::DynamicImage>,
         {
-            let image = Image::<TP, 1>::try_from(dynamic).map_err(|e| e.error)?;
+            let image = Image::<TP, 1>::try_from(dynamic)?;
             Ok(image.into_rust_image_dynamic())
         }
 

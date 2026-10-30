@@ -7,7 +7,7 @@ use std::{
 use bytemuck::Pod;
 use imbuf::{
     DynamicImage, DynamicImageChannel, DynamicImageChannelView, Image, ImageChannelVTable,
-    IncompatibleImage, PixelType, PixelTypePrimitive,
+    IncompatibleImageError, PixelType, PixelTypePrimitive,
 };
 use opencv::{
     core::{
@@ -37,7 +37,7 @@ pub trait OpencvIntoImbuf {
         self,
     ) -> opencv::Result<Image<TP, CHANNELS>>
     where
-        Image<TP, CHANNELS>: TryFrom<DynamicImage, Error = IncompatibleImage<DynamicImage>>;
+        Image<TP, CHANNELS>: TryFrom<DynamicImage, Error = IncompatibleImageError>;
 }
 
 impl OpencvIntoImbuf for Mat {
@@ -57,10 +57,10 @@ impl OpencvIntoImbuf for Mat {
         self,
     ) -> opencv::Result<Image<TP, CHANNELS>>
     where
-        Image<TP, CHANNELS>: TryFrom<DynamicImage, Error = IncompatibleImage<DynamicImage>>,
+        Image<TP, CHANNELS>: TryFrom<DynamicImage, Error = IncompatibleImageError>,
     {
         Image::try_from(self.into_imbuf_dynamic()?)
-            .map_err(|e| opencv::Error::new(Code::StsUnsupportedFormat.into(), e.error.to_string()))
+            .map_err(|e| opencv::Error::new(Code::StsUnsupportedFormat.into(), e.to_string()))
     }
 }
 
@@ -360,7 +360,7 @@ mod tests {
         assert_eq!(dynamic.len_nonzero().get(), 1);
         assert_matches!(
             Image::<u8, 3>::try_from(dynamic.clone()),
-            Err(imbuf::IncompatibleImage { .. })
+            Err(imbuf::IncompatibleImageError::ChannelCount(_))
         );
         let interleaved = Image::<[u8; 3], 1>::try_from(dynamic.clone())?;
         let [channel] = interleaved.into_channels();

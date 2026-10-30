@@ -42,7 +42,7 @@ pub trait ImageIntoImbuf {
     where
         TP: imbuf::PixelType,
         imbuf::Image<TP, CHANNELS>:
-            TryFrom<imbuf::DynamicImage, Error = imbuf::IncompatibleImage<imbuf::DynamicImage>>;
+            TryFrom<imbuf::DynamicImage, Error = imbuf::IncompatibleImageError>;
 }
 
 impl ImageIntoImbuf for image::DynamicImage {
@@ -150,7 +150,7 @@ impl ImageIntoImbuf for image::DynamicImage {
     where
         TP: imbuf::PixelType,
         imbuf::Image<TP, CHANNELS>:
-            TryFrom<imbuf::DynamicImage, Error = imbuf::IncompatibleImage<imbuf::DynamicImage>>,
+            TryFrom<imbuf::DynamicImage, Error = imbuf::IncompatibleImageError>,
     {
         let dynamic = self.into_imbuf_dynamic().map_err(|e| e.to_string())?;
         imbuf::Image::try_from(dynamic).map_err(|e| e.to_string())

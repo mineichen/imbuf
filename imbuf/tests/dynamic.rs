@@ -1,7 +1,9 @@
 use assert_matches::assert_matches;
 use std::num::NonZeroU32;
 
-use imbuf::{DynamicImage, Image, ImageChannel, ImageView, IncompatibleImage};
+use imbuf::{
+    DynamicImage, Image, ImageChannel, ImageView, IncompatibleImage, IncompatibleImageError,
+};
 use testresult::TestResult;
 
 const NZ_1: NonZeroU32 = NonZeroU32::MIN;
@@ -22,8 +24,12 @@ fn create_from_dynamic_with_different_size() -> TestResult {
     dynamic[0] = ImageChannel::new_vec(vec![42f32, 42.], NZ_1, NZ_2)?.into();
 
     assert_matches!(
-        <Image<f32, 3>>::try_from(dynamic.clone()),
+        Result::<Image<f32, 3>, IncompatibleImage<_>>::from(dynamic.clone()),
         Err(IncompatibleImage { image, .. }) if image == dynamic
+    );
+    assert_matches!(
+        <Image<f32, 3>>::try_from(dynamic),
+        Err(IncompatibleImageError::MixedImageSizes { .. })
     );
     Ok(())
 }
@@ -35,8 +41,12 @@ fn create_from_dynamic_with_different_type() -> TestResult {
     dynamic[0] = ImageChannel::new_vec(vec![1u16], NZ_1, NZ_1)?.into();
 
     assert_matches!(
-        <Image<f32, 3>>::try_from(dynamic.clone()),
+        Result::<Image<f32, 3>, IncompatibleImage<_>>::from(dynamic.clone()),
         Err(IncompatibleImage { image, .. }) if image == dynamic
+    );
+    assert_matches!(
+        <Image<f32, 3>>::try_from(dynamic),
+        Err(IncompatibleImageError::Channel(_))
     );
     Ok(())
 }
@@ -46,8 +56,12 @@ fn create_from_dynamic_with_too_few_channels() -> TestResult {
     let image: Image<f32, 3> = Image::new_vec(vec![42f32, 42., 43.], NZ_1, NZ_1)?;
     let dynamic = DynamicImage::from(image);
     assert_matches!(
-        <Image<f32, 4>>::try_from(dynamic.clone()),
+        Result::<Image<f32, 4>, IncompatibleImage<_>>::from(dynamic.clone()),
         Err(IncompatibleImage { image, .. }) if image == dynamic
+    );
+    assert_matches!(
+        <Image<f32, 4>>::try_from(dynamic),
+        Err(IncompatibleImageError::ChannelCount(_))
     );
     Ok(())
 }
@@ -57,7 +71,7 @@ fn create_from_dynamic_with_too_many_channels() -> TestResult {
     let image: Image<f32, 3> = Image::new_vec(vec![42f32, 42., 43.], NZ_1, NZ_1)?;
     let dynamic = DynamicImage::from(image);
     assert_matches!(
-        <Image<f32, 2>>::try_from(dynamic.clone()),
+        Result::<Image<f32, 2>, IncompatibleImage<_>>::from(dynamic.clone()),
         Err(IncompatibleImage { image, .. }) if image == dynamic
     );
     assert_matches!(<ImageView<f32, 2>>::try_from(&dynamic), Err(_));
