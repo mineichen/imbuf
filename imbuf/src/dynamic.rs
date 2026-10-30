@@ -128,6 +128,42 @@ impl<'a> DynamicImageView<'a> {
         }
     }
 
+    /// Try to view this image as a `ImageView<T, CHANNELS>` without copying.
+    ///
+    /// Fails, if the channel count, the pixel layouts or the dimensions don't match.
+    /// Use [`ImageView::view`] on the result to get a borrowed image by value.
+    pub fn try_cast<T: PixelType, const CHANNELS: usize>(
+        &self,
+    ) -> Result<&ImageView<'a, T, CHANNELS>, IncompatibleImageError>
+    where
+        T::Primitive: Pod,
+    {
+        self.try_into()
+    }
+
+    /// Mutable version of [`DynamicImageView::try_cast`].
+    pub fn try_cast_mut<T: PixelType, const CHANNELS: usize>(
+        &mut self,
+    ) -> Result<&mut ImageView<'a, T, CHANNELS>, IncompatibleImageError>
+    where
+        T::Primitive: Pod,
+    {
+        self.try_into()
+    }
+
+    /// Converts this image into a `ImageView<T, CHANNELS>` without copying.
+    ///
+    /// Drops the image on failure. To get it back, convert into
+    /// `Result<ImageView, IncompatibleImage<DynamicImageView>>` with `From`/`Into` instead.
+    pub fn try_into_typed<T: PixelType, const CHANNELS: usize>(
+        self,
+    ) -> Result<ImageView<'a, T, CHANNELS>, IncompatibleImageError>
+    where
+        T::Primitive: Pod,
+    {
+        self.try_into()
+    }
+
     /// Checks, that the channel count, the pixel layouts and the dimensions match
     fn ensure_compatible<T: PixelType, const CHANNELS: usize>(
         &self,
@@ -449,6 +485,15 @@ impl<'a> DynamicImageChannelView<'a> {
         self.try_into()
     }
 
+    pub fn try_into_typed<TP: PixelType>(
+        self,
+    ) -> Result<ImageChannelView<'a, TP>, IncompatibleChannelError>
+    where
+        TP::Primitive: Pod,
+    {
+        self.try_into()
+    }
+
     /// Checks that `width * height * pixel_elements` doesn't overflow `usize` and matches
     /// `buffer_len`, e.g. to validate untrusted dimensions before passing them to
     /// [`DynamicImageChannelView::from_raw_parts`]. For buffers, which store one element per
@@ -700,14 +745,7 @@ where
     type Error = IncompatibleImageError;
 
     fn try_from(value: &'b DynamicImageView<'a>) -> Result<Self, Self::Error> {
-        value.ensure_compatible::<T, CHANNELS>()?;
-        let mut iter = value.channels.iter();
-        let channels = std::array::from_fn(|_| {
-            let channel = iter.next().expect("The channel count is checked above");
-            // Safety: Size, alignment and pixel_elements are checked above. Pod accepts any bit pattern
-            unsafe { ImageChannelView::<T>::from_dynamic_ref_unchecked(channel) }.view()
-        });
-        Ok(ImageView::from_channels_unchecked(channels))
+        <&ImageView<'a, T, CHANNELS>>::try_from(value).map(ImageView::view)
     }
 }
 
@@ -721,14 +759,49 @@ where
     type Error = IncompatibleImageError;
 
     fn try_from(value: &'b mut DynamicImageView<'a>) -> Result<Self, Self::Error> {
+        <&mut ImageView<'a, T, CHANNELS>>::try_from(value).map(ImageView::view_mut)
+    }
+}
+
+/// Views the channels as an image without copying, see [`DynamicImageView::try_cast`]
+impl<'a, 'b, T: PixelType, const CHANNELS: usize> TryFrom<&'b DynamicImageView<'a>>
+    for &'b ImageView<'a, T, CHANNELS>
+where
+    T::Primitive: Pod,
+{
+    type Error = IncompatibleImageError;
+
+    fn try_from(value: &'b DynamicImageView<'a>) -> Result<Self, Self::Error> {
         value.ensure_compatible::<T, CHANNELS>()?;
-        let mut iter = value.channels.iter_mut();
-        let channels = std::array::from_fn(|_| {
-            let channel = iter.next().expect("The channel count is checked above");
-            // Safety: Size, alignment and pixel_elements are checked above. Pod accepts any bit pattern
-            unsafe { ImageChannelView::<T>::from_dynamic_mut_unchecked(channel) }.view_mut()
-        });
-        Ok(ImageView::from_channels_unchecked(channels))
+        let channels = value
+            .channels
+            .as_slice()
+            .try_into()
+            .expect("The channel count is checked above");
+        // Safety: Size, alignment, pixel_elements and dimensions are checked above. Pod accepts
+        // any bit pattern
+        Ok(unsafe { ImageView::from_dynamic_ref_unchecked(channels) })
+    }
+}
+
+/// Mutably views the channels as an image without copying, see [`DynamicImageView::try_cast_mut`]
+impl<'a, 'b, T: PixelType, const CHANNELS: usize> TryFrom<&'b mut DynamicImageView<'a>>
+    for &'b mut ImageView<'a, T, CHANNELS>
+where
+    T::Primitive: Pod,
+{
+    type Error = IncompatibleImageError;
+
+    fn try_from(value: &'b mut DynamicImageView<'a>) -> Result<Self, Self::Error> {
+        value.ensure_compatible::<T, CHANNELS>()?;
+        let channels = value
+            .channels
+            .as_mut_slice()
+            .try_into()
+            .expect("The channel count is checked above");
+        // Safety: Size, alignment, pixel_elements and dimensions are checked above. Pod accepts
+        // any bit pattern
+        Ok(unsafe { ImageView::from_dynamic_mut_unchecked(channels) })
     }
 }
 
@@ -984,6 +1057,71 @@ mod tests {
             ImageView::<u8, 2>::try_from(&dynamic),
             Err(IncompatibleImageError::MixedImageSizes { .. })
         );
+        assert_matches!(
+            dynamic.try_cast::<u8, 2>(),
+            Err(IncompatibleImageError::MixedImageSizes { .. })
+        );
+        assert_matches!(
+            dynamic.try_cast_mut::<u8, 2>(),
+            Err(IncompatibleImageError::MixedImageSizes { .. })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn try_cast_dynamic_image() -> TestResult {
+        let data = vec![1u8, 2];
+        let data_ptr = data.as_ptr() as usize;
+        let dynamic = DynamicImage::from(Image::<u8, 2>::new_vec(data, NZ_1, NZ_1)?);
+        let image = dynamic.try_cast::<u8, 2>()?;
+        assert_eq!(image.buffers(), [[1], [2]]);
+        assert_eq!(
+            image.buffers()[0].as_ptr() as usize,
+            data_ptr,
+            "Should share the buffer"
+        );
+
+        assert_matches!(
+            dynamic.try_cast::<u8, 1>(),
+            Err(IncompatibleImageError::ChannelCount(_))
+        );
+        assert_matches!(
+            dynamic.try_cast::<u16, 2>(),
+            Err(IncompatibleImageError::Channel(_))
+        );
+        assert_matches!(
+            dynamic.try_cast::<[u8; 2], 2>(),
+            Err(IncompatibleImageError::Channel(_))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn try_cast_mut_dynamic_image_writes_into_dynamic_image() -> TestResult {
+        let mut dynamic = DynamicImage::from(Image::<u16, 2>::new_vec(vec![1, 2], NZ_1, NZ_1)?);
+        let clone = dynamic.clone();
+        assert_matches!(
+            dynamic.try_cast_mut::<u8, 2>(),
+            Err(IncompatibleImageError::Channel(_))
+        );
+
+        let image = dynamic.try_cast_mut::<u16, 2>()?;
+        image.make_mut()[1][0] = 3;
+        assert_eq!(dynamic[1].buffer_flat::<u16>(), Ok(&[3][..]));
+        assert_eq!(clone[1].buffer_flat::<u16>(), Ok(&[2][..]));
+        Ok(())
+    }
+
+    #[test]
+    fn try_into_typed_dynamic_image() -> TestResult {
+        let rgb = Image::<[u8; 3], 1>::new_vec(vec![[1, 2, 3]], NZ_1, NZ_1)?;
+        let dynamic = DynamicImage::from(rgb);
+        assert_matches!(
+            dynamic.clone().try_into_typed::<u8, 1>(),
+            Err(IncompatibleImageError::Channel(_))
+        );
+        let rgb_back = dynamic.try_into_typed::<[u8; 3], 1>()?;
+        assert_eq!(rgb_back.into_vec(), vec![[1, 2, 3]]);
         Ok(())
     }
 
