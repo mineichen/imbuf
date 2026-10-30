@@ -19,7 +19,7 @@ impl DynamicImageChannel {
     /// The drop function, which assumes `NonZeroU8` could get Zero values, which is UB.
     /// Furthermore, `width`/`height`/`pixel_elements` are not checked against `input.len()` or for overflows
     #[must_use]
-    pub unsafe fn from_vec_flat_unchecked<T: PixelTypePrimitive>(
+    pub unsafe fn new_vec_flat_unchecked<T: PixelTypePrimitive>(
         input: Vec<T>,
         width: NonZeroU32,
         height: NonZeroU32,

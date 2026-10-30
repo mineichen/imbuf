@@ -3,7 +3,7 @@ Remove UnsafeImageChannel │
 │ Context │
 │ │
 │ UnsafeImageChannel only exists as a bag of raw fields that is (a) assembled and handed to │
-│ from_unsafe, (b) read in vtables via get_unsafe, and (c) mutated in two make_mut │
+│ from*unsafe, (b) read in vtables via get_unsafe, and (c) mutated in two make_mut │
 │ implementations via get_unsafe_mut. Since vtables receive a DynamicImageChannelView │
 │ that has to be valid again when the function returns, a separate "maybe invalid" type adds API │
 │ surface without enabling anything. Both get_unsafe_mut uses (arc make_mut, view │
@@ -24,10 +24,10 @@ Remove UnsafeImageChannel │
 │ DynamicImageChannelView::raw_ptr(ch) -> *const u8, raw_data(ch) -> *mut (), │
 │ raw_vtable(ch) -> &'static ImageChannelVTable. │
 │ - Remove get_unsafe_mut. Mutation in make_mut = assign a new channel: │
-│ - imbuf/src/arc.rs make_mut: *image = DynamicImageChannel::from_arc(new_data, w, h, pe) │
+│ - imbuf/src/arc.rs make_mut: *image = DynamicImageChannel::new_arc(new_data, w, h, pe) │
 │ (old channel's drop releases its Arc share; drop the ManuallyDrop view without releasing). │
 │ - imbuf/src/view.rs make_original_mut: read original from raw_data, call │
-│ original.make_exclusive(), then _image = slice_mut_channel::<T>(raw_ptr(original), ..., original) │
+│ original.make_exclusive(), then \_image = slice_mut_channel::<T>(raw_ptr(original), ..., original) │
 │ (old drop is a no-op). Needs T → make it generic make_original_mut::<T>. │
 │ - Move calc_len_packed/flat helpers into usage of existing len()/len_flat() │
 │ (vec.rs drop_vec_channel uses image.len_flat()). │
@@ -41,7 +41,7 @@ Remove UnsafeImageChannel │
 │ - imbuf/src/{vec,arc,shared_vec,view}.rs — constructors + accessors as above. │
 │ - imbuf/src/lib.rs — drop export. │
 │ - imbuf/tests/custom_primitive.rs, imbuf-opencv/src/into_imbuf.rs — from_raw_parts, raw_data/raw_vtable. │
-│ - Docs: imbuf/Releases.md 0.4.0 (replace the UnsafeImageChannel/from_unsafe/get_unsafe_ │
+│ - Docs: imbuf/Releases.md 0.4.0 (replace the UnsafeImageChannel/from_unsafe/get_unsafe* │
 │ bullets with: "Remove UnsafeImageChannel; add unsafe from_raw_parts and raw_ptr/raw_data/raw_vtable; │
 │ make_mut replaces the channel by assignment"), RELEASE_CHANGES.md opencv entry. │
 │ │

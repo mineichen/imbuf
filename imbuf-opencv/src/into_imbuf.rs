@@ -252,7 +252,7 @@ fn copied_channel<P: PixelTypePrimitive + Pod>(
     // Safety: The vtable is built for P
     let data = unsafe { image.buffer_flat_unchecked::<P>() }.into();
     unsafe {
-        DynamicImageChannel::from_arc_flat_unchecked(
+        DynamicImageChannel::new_arc_flat_unchecked(
             data,
             image.width(),
             image.height(),

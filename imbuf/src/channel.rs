@@ -72,7 +72,7 @@ impl<TP: PixelType> ImageChannel<TP> {
 
         // Safety: The vtable is built for TP::Primitive with TP::ELEMENTS
         unsafe {
-            let channel = DynamicImageChannel::from_vec_flat_unchecked(
+            let channel = DynamicImageChannel::new_vec_flat_unchecked(
                 flat_input,
                 width,
                 height,
@@ -93,7 +93,7 @@ impl<TP: PixelType> ImageChannel<TP> {
         let flat_input = crate::pixel::flat_arc(input);
         unsafe {
             // Safety: The vtable is built for TP::Primitive with TP::ELEMENTS
-            let ch = DynamicImageChannel::from_arc_flat_unchecked(
+            let ch = DynamicImageChannel::new_arc_flat_unchecked(
                 flat_input,
                 width,
                 height,
