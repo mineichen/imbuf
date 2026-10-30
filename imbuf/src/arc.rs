@@ -6,11 +6,49 @@ use std::{
 };
 
 use crate::{
-    DynamicImageChannel, DynamicImageChannelView, PixelTypePrimitive,
+    DynamicImageChannel, DynamicImageChannelView, Image, ImageChannel, InvalidLenError, PixelType,
+    PixelTypePrimitive,
     channel::{ChannelFactory, ImageChannelVTable, bytes_per_primitive},
 };
 
 struct ArcFactory;
+
+impl<T> Image<T, 1>
+where
+    T: PixelType,
+{
+    // Todo: If shared_vec is extendedto support various owned slices, it could be implemented on all channel sizes too
+    pub fn new_arc(
+        input: Arc<[T]>,
+        width: NonZeroU32,
+        height: NonZeroU32,
+    ) -> Result<Self, InvalidLenError> {
+        let channel = ImageChannel::new_arc(input, width, height)?;
+        Ok(Self::from_channel(channel))
+    }
+}
+
+impl<TP: PixelType> ImageChannel<TP> {
+    pub fn new_arc(
+        input: Arc<[TP]>,
+        width: NonZeroU32,
+        height: NonZeroU32,
+    ) -> Result<Self, InvalidLenError> {
+        DynamicImageChannel::ensure_valid_len(width, height, input.len())?;
+
+        let flat_input = crate::pixel::flat_arc(input);
+        unsafe {
+            // Safety: The vtable is built for TP::Primitive with TP::ELEMENTS
+            let ch = DynamicImageChannel::new_arc_flat_unchecked(
+                flat_input,
+                width,
+                height,
+                TP::ELEMENTS,
+            );
+            Ok(Self::from_dynamic_unchecked(ch))
+        }
+    }
+}
 
 impl DynamicImageChannel {
     /// # Safety
