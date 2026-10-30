@@ -133,7 +133,7 @@ unsafe extern "C-unwind" fn copy_into_arc<T: PixelTypePrimitive>(
     // Safety: The vtable is built for T
     let copy = unsafe { image.buffer_flat_unchecked::<T>() };
     *image = unsafe {
-        DynamicImageChannel::from_arc_flat_unchecked(
+        DynamicImageChannel::new_arc_flat_unchecked(
             copy.into(),
             image.width(),
             image.height(),

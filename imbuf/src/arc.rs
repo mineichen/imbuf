@@ -20,7 +20,7 @@ impl DynamicImageChannel {
     /// You could easily transform `Image<NonZeroU8>` into a `DynamicImage` and turn it into `Image<u8>` and modify it.
     /// The drop function, which assumes `NonZeroU8` could get Zero values, which is UB.
     /// Furthermore, `width`/`height`/`pixel_elements` are not checked against the input len
-    pub unsafe fn from_arc_flat_unchecked<T: PixelTypePrimitive>(
+    pub unsafe fn new_arc_flat_unchecked<T: PixelTypePrimitive>(
         input: Arc<[T]>,
         width: NonZeroU32,
         height: NonZeroU32,
@@ -49,7 +49,7 @@ impl DynamicImageChannel {
     }
 }
 
-/// Borrows the `Arc` of a channel created by `from_arc` without taking ownership
+/// Borrows the `Arc` of a channel created by `new_arc` without taking ownership
 unsafe fn arc_view<T>(image: &DynamicImageChannelView<'_>) -> ManuallyDrop<Arc<[T]>> {
     let ptr = ptr::slice_from_raw_parts(
         DynamicImageChannelView::raw_ptr(image).cast::<T>(),
@@ -73,7 +73,7 @@ impl<T: PixelTypePrimitive> ChannelFactory<T> for ArcFactory {
                 // `ManuallyDrop` doesn't run `Drop`. The assignment below drops the old channel
                 // via its vtable, which releases the share instead.
                 *image = unsafe {
-                    DynamicImageChannel::from_arc_flat_unchecked(
+                    DynamicImageChannel::new_arc_flat_unchecked(
                         new_data,
                         width,
                         height,
@@ -90,7 +90,7 @@ impl<T: PixelTypePrimitive> ChannelFactory<T> for ArcFactory {
             image: &DynamicImageChannelView<'a>,
         ) -> DynamicImageChannelView<'a> {
             unsafe {
-                DynamicImageChannel::from_arc_flat_unchecked(
+                DynamicImageChannel::new_arc_flat_unchecked(
                     Arc::clone(&arc_view::<T>(image)),
                     image.width(),
                     image.height(),
@@ -112,7 +112,7 @@ pub(crate) unsafe extern "C-unwind" fn clone_slice_into_arc_channel<'a, T: Pixel
     image: &DynamicImageChannelView<'a>,
 ) -> DynamicImageChannelView<'a> {
     unsafe {
-        DynamicImageChannel::from_arc_flat_unchecked(
+        DynamicImageChannel::new_arc_flat_unchecked(
             // Safety: The vtable is built for T
             Arc::from(image.buffer_flat_unchecked::<T>()),
             image.width(),

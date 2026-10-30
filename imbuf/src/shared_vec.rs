@@ -101,7 +101,7 @@ unsafe extern "C-unwind" fn make_mut_shared_vec<T: PixelTypePrimitive, const CHA
         // Assigning drops the previous channel, which releases its share of the Vec
         // Safety: Since we got a DynamicImageChannelView as input, sizes are valid
         *channel = unsafe {
-            DynamicImageChannel::from_vec_flat_unchecked(
+            DynamicImageChannel::new_vec_flat_unchecked(
                 copy,
                 channel.width(),
                 channel.height(),

@@ -264,7 +264,7 @@ impl DynamicImageChannel {
         DynamicImageChannel::ensure_valid_len(width, height, data.len())?;
         let data_flat = crate::pixel::flat_vec(data);
         // Safety: The length is checked above and T is Pod
-        Ok(unsafe { Self::from_vec_flat_unchecked(data_flat, width, height, T::ELEMENTS) })
+        Ok(unsafe { Self::new_vec_flat_unchecked(data_flat, width, height, T::ELEMENTS) })
     }
 
     /// Creates a channel from a flat buffer with `pixel_elements` primitives per pixel, e.g. if
@@ -272,7 +272,7 @@ impl DynamicImageChannel {
     /// pixels (e.g. `Vec<[u8; 3]>`).
     ///
     /// Fails, if `width * height * pixel_elements` doesn't match `data.len()` or overflows `usize`.
-    pub fn from_vec_flat<T: PixelTypePrimitive + Pod>(
+    pub fn new_vec_flat<T: PixelTypePrimitive + Pod>(
         data: Vec<T>,
         width: NonZeroU32,
         height: NonZeroU32,
@@ -280,7 +280,7 @@ impl DynamicImageChannel {
     ) -> Result<Self, InvalidLenError> {
         DynamicImageChannel::ensure_valid_flat_len(width, height, pixel_elements, data.len())?;
         // Safety: The length is checked above and T is Pod
-        Ok(unsafe { Self::from_vec_flat_unchecked(data, width, height, pixel_elements) })
+        Ok(unsafe { Self::new_vec_flat_unchecked(data, width, height, pixel_elements) })
     }
 }
 
@@ -1257,9 +1257,9 @@ mod tests {
     }
 
     #[test]
-    fn from_vec_flat_with_runtime_pixel_elements() -> TestResult {
+    fn new_vec_flat_with_runtime_pixel_elements() -> TestResult {
         let channel =
-            DynamicImageChannel::from_vec_flat(vec![1u8, 2, 3, 4, 5, 6], NZ_2, NZ_1, NZ_U8_3)?;
+            DynamicImageChannel::new_vec_flat(vec![1u8, 2, 3, 4, 5, 6], NZ_2, NZ_1, NZ_U8_3)?;
         assert_eq!(NZ_U8_3, channel.pixel_elements());
         assert_eq!(&[[1u8, 2, 3], [4, 5, 6]], channel.buffer::<[u8; 3]>()?);
         Ok(())
@@ -1267,7 +1267,7 @@ mod tests {
 
     #[test]
     fn from_vec_flat_with_wrong_len_fails() {
-        let result = DynamicImageChannel::from_vec_flat(vec![1u8, 2, 3, 4, 5], NZ_2, NZ_1, NZ_U8_3);
+        let result = DynamicImageChannel::new_vec_flat(vec![1u8, 2, 3, 4, 5], NZ_2, NZ_1, NZ_U8_3);
         assert_matches!(
             result,
             Err(InvalidLenError::BufferMismatch {
