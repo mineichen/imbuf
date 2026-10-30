@@ -2,7 +2,6 @@ use std::{
     fmt::{self, Debug, Formatter},
     num::{NonZeroU8, NonZeroU32},
     ptr,
-    sync::Arc,
 };
 
 use crate::{
@@ -34,73 +33,6 @@ impl<T: PixelType, const CHANNELS: usize> PartialEq for ImageView<'_, T, CHANNEL
 
 #[allow(clippy::len_without_is_empty)]
 impl<const CHANNELS: usize, T: PixelType> Image<T, CHANNELS> {
-    pub fn new_vec_flat(
-        mut input: Vec<T::Primitive>,
-        width: NonZeroU32,
-        height: NonZeroU32,
-    ) -> Result<Self, InvalidLenError>
-    where
-        T: PixelType,
-    {
-        Self::ensure_valid_flat_len(width, height, input.len())?;
-        if CHANNELS > 1 {
-            // The channels share the planar buffer, so it doesn't have to be cast to `T`
-            // Safety: The length is checked above
-            let channels = unsafe {
-                crate::shared_vec::create_shared_channels_unchecked(
-                    input,
-                    [(width, height); CHANNELS],
-                )
-            };
-            return Ok(Self(channels));
-        }
-        let pixel_elements = T::ELEMENTS.get() as usize;
-        if input.capacity() % pixel_elements != 0 {
-            // Vec<T> cannot represent the allocation. Boxed slices have an exact capacity.
-            input = input.into_boxed_slice().into_vec();
-        }
-
-        let cap = input.capacity() / pixel_elements;
-        let len = input.len() / pixel_elements;
-        let ptr = input.as_mut_ptr().cast::<T>();
-        std::mem::forget(input);
-        let cast_input = unsafe { Vec::from_raw_parts(ptr, len, cap) };
-
-        Self::new_vec(cast_input, width, height)
-    }
-
-    pub fn new_vec(
-        input: Vec<T>,
-        width: NonZeroU32,
-        height: NonZeroU32,
-    ) -> Result<Self, InvalidLenError>
-    where
-        T: Clone,
-    {
-        Self::ensure_valid_len(width, height, input.len())?;
-
-        if CHANNELS == 1 {
-            let channel = ImageChannel::<T>::new_vec(input, width, height)?;
-            unsafe {
-                let mut arr = std::mem::MaybeUninit::<[ImageChannel<T>; CHANNELS]>::uninit();
-                std::ptr::write(arr.as_mut_ptr().cast::<ImageChannel<T>>(), channel);
-                Ok(Self(arr.assume_init()))
-            }
-        } else {
-            let flat_input = crate::pixel::flat_vec(input);
-            // Safety: The length is checked above to be `width * height * CHANNELS`, so the flat
-            // length is `width * height * T::ELEMENTS * CHANNELS`, which fits `usize`, as the
-            // buffer exists
-            let channels = unsafe {
-                crate::shared_vec::create_shared_channels_unchecked(
-                    flat_input,
-                    [(width, height); CHANNELS],
-                )
-            };
-            Ok(Self(channels))
-        }
-    }
-
     #[must_use]
     #[allow(clippy::missing_panics_doc)]
     pub fn from_interleaved(i: &ImageView<'_, [T; CHANNELS], 1>) -> Self
@@ -355,21 +287,6 @@ impl<'a, T: PixelType, const CHANNELS: usize> ImageView<'a, T, CHANNELS> {
     }
 }
 
-impl<T> Image<T, 1>
-where
-    T: PixelType,
-{
-    // Todo: If shared_vec is extendedto support various owned slices, it could be implemented on all channel sizes too
-    pub fn new_arc(
-        input: Arc<[T]>,
-        width: NonZeroU32,
-        height: NonZeroU32,
-    ) -> Result<Self, InvalidLenError> {
-        let channel = ImageChannel::new_arc(input, width, height)?;
-        Ok(Self([channel]))
-    }
-}
-
 impl<'a, T: PixelType> ImageView<'a, T, 1> {
     #[must_use]
     pub fn from_channel(ch: ImageChannelView<'a, T>) -> Self {
@@ -600,18 +517,6 @@ mod tests {
     }
 
     #[test]
-    fn new_vec_flat_reports_len_in_primitives() {
-        // 3 primitives are a whole pixel, but 2 pixels are required
-        assert_matches!(
-            Image::<[u8; 3], 1>::new_vec_flat(vec![1, 2, 3], NZ_2, NZ_1),
-            Err(InvalidLenError::BufferMismatch {
-                expected: 6,
-                actual: 3
-            })
-        );
-    }
-
-    #[test]
     fn ensure_valid_len_of_image() {
         assert_eq!(
             ImageView::<[u8; 3], 2>::ensure_valid_len(NZ_2, NZ_1, 4),
@@ -763,21 +668,6 @@ mod tests {
             to_vec2[..].as_ptr(),
             "Should reuse the buffer if it was created by vec"
         );
-        Ok(())
-    }
-
-    #[test]
-    fn create_interleaved_from_flat_vec() -> TestResult {
-        let image: Image<[u8; 3], 1> = Image::new_vec(
-            vec![[0, 1, 2], [3, 4, 5], [6, 7, 8], [9, 10, 11]],
-            NZ_2,
-            NZ_2,
-        )?;
-        let buffer = image.buffer_flat().to_vec();
-        assert_eq!(buffer.len(), 12);
-        let image_from_flat: Image<[u8; 3], 1> = Image::new_vec_flat(buffer, NZ_2, NZ_2)?;
-
-        assert_eq!(image, image_from_flat);
         Ok(())
     }
 }

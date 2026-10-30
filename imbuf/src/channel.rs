@@ -6,14 +6,13 @@ use std::{
     mem,
     num::{NonZeroU8, NonZeroU32, NonZeroUsize},
     ptr, slice,
-    sync::Arc,
 };
 
 use bytemuck::{NoUninit, Pod};
 
 use crate::{
     PixelTypePrimitive,
-    dynamic::{DynamicImageChannel, DynamicImageChannelView},
+    dynamic::DynamicImageChannelView,
     error::{IncompatibleChannel, IncompatibleChannelError, InvalidLenError},
     pixel::PixelType,
 };
@@ -57,50 +56,6 @@ impl<TP: PixelType> Clone for ImageChannelView<'_, TP> {
 impl<TP: PixelType> PartialEq for ImageChannelView<'_, TP> {
     fn eq(&self, other: &Self) -> bool {
         self.dimensions() == other.dimensions() && self.buffer_flat() == other.buffer_flat()
-    }
-}
-
-impl<TP: PixelType> ImageChannel<TP> {
-    pub fn new_vec(
-        input: Vec<TP>,
-        width: NonZeroU32,
-        height: NonZeroU32,
-    ) -> Result<Self, InvalidLenError> {
-        DynamicImageChannelView::ensure_valid_len(width, height, input.len())?;
-
-        let flat_input = crate::pixel::flat_vec(input);
-
-        // Safety: The vtable is built for TP::Primitive with TP::ELEMENTS
-        unsafe {
-            let channel = DynamicImageChannel::new_vec_flat_unchecked(
-                flat_input,
-                width,
-                height,
-                TP::ELEMENTS,
-            );
-
-            Ok(Self::from_dynamic_unchecked(channel))
-        }
-    }
-
-    pub fn new_arc(
-        input: Arc<[TP]>,
-        width: NonZeroU32,
-        height: NonZeroU32,
-    ) -> Result<Self, InvalidLenError> {
-        DynamicImageChannel::ensure_valid_len(width, height, input.len())?;
-
-        let flat_input = crate::pixel::flat_arc(input);
-        unsafe {
-            // Safety: The vtable is built for TP::Primitive with TP::ELEMENTS
-            let ch = DynamicImageChannel::new_arc_flat_unchecked(
-                flat_input,
-                width,
-                height,
-                TP::ELEMENTS,
-            );
-            Ok(Self::from_dynamic_unchecked(ch))
-        }
     }
 }
 
@@ -502,9 +457,10 @@ pub(crate) trait ChannelFactory<T> {
 #[cfg(test)]
 mod tests {
     use assert_matches::assert_matches;
+    use std::sync::Arc;
     use testresult::TestResult;
 
-    use crate::{DynamicImage, Image};
+    use crate::{DynamicImage, DynamicImageChannel, Image};
 
     use super::*;
 
