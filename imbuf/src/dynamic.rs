@@ -266,6 +266,22 @@ impl DynamicImageChannel {
         // Safety: The length is checked above and T is Pod
         Ok(unsafe { Self::from_vec_flat_unchecked(data_flat, width, height, T::ELEMENTS) })
     }
+
+    /// Creates a channel from a flat buffer with `pixel_elements` primitives per pixel, e.g. if
+    /// `pixel_elements` is only known at runtime. Use [`DynamicImageChannel::new_vec`] for typed
+    /// pixels (e.g. `Vec<[u8; 3]>`).
+    ///
+    /// Fails, if `width * height * pixel_elements` doesn't match `data.len()` or overflows `usize`.
+    pub fn from_vec_flat<T: PixelTypePrimitive + Pod>(
+        data: Vec<T>,
+        width: NonZeroU32,
+        height: NonZeroU32,
+        pixel_elements: NonZeroU8,
+    ) -> Result<Self, InvalidLenError> {
+        DynamicImageChannel::ensure_valid_flat_len(width, height, pixel_elements, data.len())?;
+        // Safety: The length is checked above and T is Pod
+        Ok(unsafe { Self::from_vec_flat_unchecked(data, width, height, pixel_elements) })
+    }
 }
 
 impl<'a> DynamicImageChannelView<'a> {
@@ -1238,5 +1254,26 @@ mod tests {
             })) if first_bytes_per_primitive.get() == 1
         );
         Ok(())
+    }
+
+    #[test]
+    fn from_vec_flat_with_runtime_pixel_elements() -> TestResult {
+        let channel =
+            DynamicImageChannel::from_vec_flat(vec![1u8, 2, 3, 4, 5, 6], NZ_2, NZ_1, NZ_U8_3)?;
+        assert_eq!(NZ_U8_3, channel.pixel_elements());
+        assert_eq!(&[[1u8, 2, 3], [4, 5, 6]], channel.buffer::<[u8; 3]>()?);
+        Ok(())
+    }
+
+    #[test]
+    fn from_vec_flat_with_wrong_len_fails() {
+        let result = DynamicImageChannel::from_vec_flat(vec![1u8, 2, 3, 4, 5], NZ_2, NZ_1, NZ_U8_3);
+        assert_matches!(
+            result,
+            Err(InvalidLenError::BufferMismatch {
+                expected: 6,
+                actual: 5
+            })
+        );
     }
 }
