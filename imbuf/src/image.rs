@@ -1,6 +1,7 @@
 use std::{
     fmt::{self, Debug, Formatter},
     num::{NonZeroU8, NonZeroU32},
+    ptr,
     sync::Arc,
 };
 
@@ -232,6 +233,43 @@ impl<'a, T: PixelType, const CHANNELS: usize> ImageView<'a, T, CHANNELS> {
         channels: [ImageChannelView<'a, T>; CHANNELS],
     ) -> Self {
         Self(channels)
+    }
+
+    /// Views the channels of a [`DynamicImageView`](crate::DynamicImageView) as an image without
+    /// copying
+    ///
+    /// # Safety
+    /// All channels have to fit `T` (see [`ImageChannelView::from_dynamic_unchecked`]) and have
+    /// the same dimensions
+    pub(crate) unsafe fn from_dynamic_ref_unchecked<'b>(
+        channels: &'b [DynamicImageChannelView<'a>; CHANNELS],
+    ) -> &'b Self {
+        debug_assert_eq!(Ok(()), Self::ensure_fits_dynamic(channels));
+        // Safety: `ImageView` is repr(transparent) over an array of `ImageChannelView`, which is
+        // repr(transparent) over `DynamicImageChannelView`. The layout is forwarded to the caller
+        unsafe { &*ptr::from_ref(channels).cast::<Self>() }
+    }
+
+    /// Mutable reference version of [`ImageView::from_dynamic_ref_unchecked`]
+    ///
+    /// # Safety
+    /// See [`ImageView::from_dynamic_ref_unchecked`]
+    pub(crate) unsafe fn from_dynamic_mut_unchecked<'b>(
+        channels: &'b mut [DynamicImageChannelView<'a>; CHANNELS],
+    ) -> &'b mut Self {
+        debug_assert_eq!(Ok(()), Self::ensure_fits_dynamic(channels));
+        // Safety: See `from_dynamic_ref_unchecked`
+        unsafe { &mut *ptr::from_mut(channels).cast::<Self>() }
+    }
+
+    /// Checks the requirements of [`ImageView::from_dynamic_ref_unchecked`]
+    fn ensure_fits_dynamic(
+        channels: &[DynamicImageChannelView<'a>; CHANNELS],
+    ) -> Result<(), IncompatibleImageError> {
+        channels
+            .iter()
+            .try_for_each(DynamicImageChannelView::ensure_fits_pixel::<T>)?;
+        check_dimensions(channels.iter().map(DynamicImageChannelView::dimensions))
     }
 
     #[must_use]
