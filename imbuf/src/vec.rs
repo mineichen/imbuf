@@ -8,7 +8,7 @@ use bytemuck::Pod;
 use crate::{
     DynamicImageChannel, DynamicImageChannelView, Image, ImageChannel, InvalidLenError, PixelType,
     PixelTypePrimitive,
-    channel::{ChannelFactory, ImageChannelVTable, bytes_per_primitive},
+    channel::{ChannelFactory, ImageChannelVTable, primitive_alignment, primitive_size},
 };
 
 struct VecFactory;
@@ -182,7 +182,8 @@ impl<T: PixelTypePrimitive> ChannelFactory<T> for VecFactory {
         make_mut,
         drop: drop_vec_channel::<T>,
         clone: crate::arc::clone_slice_into_arc_channel::<T>,
-        bytes_per_primitive: bytes_per_primitive::<T>,
+        primitive_size: primitive_size::<T>,
+        primitive_alignment: primitive_alignment::<T>,
     };
 }
 
@@ -261,17 +262,15 @@ mod tests {
     }
 
     #[test]
-    fn from_flat_vec_behaves_similar_to_from_interleaved() -> TestResult {
+    fn new_vec_flat_matches_transposed_planar_image() -> TestResult {
         let data = (0u8..18).collect::<Vec<_>>();
 
-        let planar = Image::<u8, 3>::from_flat_interleaved(&data, NZ_2, NZ_3)?;
-        let interleaved_direct = Image::<[u8; 3], 1>::new_vec_flat(data, NZ_2, NZ_3)?;
-        let interleaved_from_planar = Image::<[u8; 3], 1>::from_planar_image(&planar);
+        let interleaved_direct = Image::<[u8; 3], 1>::new_vec_flat(data.clone(), NZ_2, NZ_3)?;
+        let planar = interleaved_direct.clone().transpose();
+        let interleaved_from_planar: Image<[u8; 3], 1> = planar.transpose();
 
-        assert_eq!(
-            interleaved_direct.buffer(),
-            interleaved_from_planar.buffer()
-        );
+        assert_eq!(interleaved_direct, interleaved_from_planar);
+        assert_eq!(interleaved_from_planar.buffer_flat(), data);
         Ok(())
     }
 

@@ -93,7 +93,7 @@ impl<'a> TryFrom<&'a imbuf::DynamicImage> for DynamicRefImage<'a> {
         let channel = value.first();
 
         match (
-            channel.bytes_per_primitive().get(),
+            channel.primitive_size().get(),
             channel.pixel_elements().get(),
         ) {
             (U8_SIZE, 1) => Ok(DynRefImg::ImageLuma8(ref_image(channel.try_cast::<u8>()?))),
@@ -160,7 +160,7 @@ impl<'a> TryFrom<&'a mut imbuf::DynamicImage> for DynamicRefImageMut<'a> {
         let channel = &mut value[0];
 
         match (
-            channel.bytes_per_primitive().get(),
+            channel.primitive_size().get(),
             channel.pixel_elements().get(),
         ) {
             (U8_SIZE, 1) => Ok(DynRefImgMut::ImageLuma8(ref_image_mut(
@@ -278,7 +278,7 @@ impl ImbufIntoImage for imbuf::DynamicImage {
         self.ensure_single_channel()?;
         let channel = self.first();
         match (
-            channel.bytes_per_primitive().get(),
+            channel.primitive_size().get(),
             channel.pixel_elements().get(),
         ) {
             (U8_SIZE, 1) => convert::<u8>(self),
@@ -298,7 +298,7 @@ impl ImbufIntoImage for imbuf::DynamicImage {
 
 /// The conversion supports no pixel type with the `actual` layout
 fn unsupported_layout(actual: PixelLayout) -> IncompatibleImageError {
-    IncompatibleChannelError::new(actual, None, false, SUPPORTED_PRIMITIVES).into()
+    IncompatibleChannelError::new(actual, None, SUPPORTED_PRIMITIVES).into()
 }
 
 /// Layout of an `image` color type, which this crate doesn't know (`image::DynamicImage` is
@@ -306,10 +306,12 @@ fn unsupported_layout(actual: PixelLayout) -> IncompatibleImageError {
 fn color_layout(color: image::ColorType) -> PixelLayout {
     // A color has at least one channel of at least one byte, so `MIN` is never used
     let pixel_elements = NonZeroU8::new(color.channel_count()).unwrap_or(NonZeroU8::MIN);
-    // `image` has no color with mixed primitive sizes
-    let bytes_per_primitive =
+    // `image` has no color with mixed primitive sizes. Its primitives (`u8`, `u16`, `f32`) are
+    // aligned to their size
+    let primitive_size =
         NonZeroU8::new(color.bytes_per_pixel() / pixel_elements).unwrap_or(NonZeroU8::MIN);
-    PixelLayout::new(pixel_elements, NonZeroUsize::from(bytes_per_primitive))
+    let primitive_size = NonZeroUsize::from(primitive_size);
+    PixelLayout::new(pixel_elements, primitive_size, primitive_size)
 }
 
 fn image_from_raw<P, T>(width: u32, height: u32, buffer: Vec<T>) -> ImageBuffer<P, Vec<T>>
@@ -456,10 +458,10 @@ mod tests {
         let image = Image::<f32, 1>::new_vec(vec![1.], NZ_1, NZ_1)?;
         let mut dynamic = imbuf::DynamicImage::from(image);
 
+        let four = NonZeroUsize::new(4).ok_or("zero")?;
         let expected = IncompatibleImageError::Channel(IncompatibleChannelError::new(
-            PixelLayout::new(NonZeroU8::MIN, NonZeroUsize::new(4).ok_or("zero")?),
+            PixelLayout::new(NonZeroU8::MIN, four, four),
             None,
-            false,
             SUPPORTED_PRIMITIVES,
         ));
         assert_eq!(

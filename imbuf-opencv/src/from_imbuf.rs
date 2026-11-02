@@ -68,8 +68,8 @@ fn unsupported_primitive(channel: &DynamicImageChannelView<'_>) -> opencv::Error
     opencv::Error::new(
         Code::StsUnsupportedFormat.into(),
         format!(
-            "unsupported format: primitives must have 1, 2 or 4 bytes and be aligned, got {} bytes",
-            channel.bytes_per_primitive()
+            "unsupported format: primitives must have 1, 2 or 4 bytes and be aligned, got {}",
+            channel.pixel_layout()
         ),
     )
 }
@@ -93,7 +93,7 @@ impl ImbufAsOpencv for DynamicImageChannelView<'_> {
             Ok(BoxedRef::from(mat))
         }
 
-        match self.bytes_per_primitive().get() {
+        match self.primitive_size().get() {
             U8_SIZE => view::<u8>(self),
             U16_SIZE => view::<u16>(self),
             F32_SIZE => view::<f32>(self),
@@ -116,7 +116,7 @@ impl ImbufAsOpencvMut for DynamicImageChannelView<'_> {
             Ok(BoxedRefMut::from(mat))
         }
 
-        match self.bytes_per_primitive().get() {
+        match self.primitive_size().get() {
             U8_SIZE => view::<u8>(self),
             U16_SIZE => view::<u16>(self),
             F32_SIZE => view::<f32>(self),
@@ -447,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_channel_with_unsupported_bytes_per_primitive_is_rejected() -> TestResult {
+    fn dynamic_channel_with_unsupported_primitive_size_is_rejected() -> TestResult {
         #[derive(Clone, Copy, PartialEq)]
         #[repr(transparent)]
         struct F64(f64);

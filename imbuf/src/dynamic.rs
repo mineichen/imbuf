@@ -2,6 +2,7 @@ use std::{
     fmt::{self, Debug, Formatter},
     iter::{self, once},
     marker::PhantomData,
+    mem::ManuallyDrop,
     num::{NonZeroU8, NonZeroU32, NonZeroUsize},
     ops::Deref,
     slice, vec,
@@ -241,7 +242,7 @@ impl std::ops::DerefMut for DynamicImageView<'_> {
 #[repr(C)]
 pub struct DynamicImageChannelView<'a> {
     /// Pointer to the buffer, which is `len_flat()` primitives of the size
-    /// `vtable.bytes_per_primitive()` long
+    /// `vtable.primitive_size()` long
     ptr: *const u8,
     width: NonZeroU32,
     height: NonZeroU32,
@@ -260,10 +261,11 @@ impl<'a> DynamicImageChannelView<'a> {
     ///
     /// # Safety
     /// The following invariants have to hold:
-    /// - The size of the buffer in bytes (`width * height * pixel_elements * vtable.bytes_per_primitive()`)
+    /// - The size of the buffer in bytes (`width * height * pixel_elements * vtable.primitive_size()`)
     ///   doesn't exceed `usize::MAX`, and the multiplications to calculate it don't overflow
     ///   `usize`, which implies that `width * height * pixel_elements` matches the buffer length.
     ///   [`DynamicImageChannelView::ensure_valid_flat_len`] checks this, e.g. for untrusted input.
+    /// - `ptr` is aligned to `vtable.primitive_alignment` of the channel, which is a power of two.
     /// - `ptr` points to an initialized buffer of that size, which stays valid until `vtable.drop`
     ///   is called and at least for `'a`. The buffer can be shared between instances.
     /// - `vtable` is able to work with `ptr` and `data` (see [`ImageChannelVTable`](crate::ImageChannelVTable)).
@@ -283,17 +285,8 @@ impl<'a> DynamicImageChannelView<'a> {
         vtable: &'static ImageChannelVTable,
         data: *mut (),
     ) -> Self {
-        debug_assert_eq!(
-            Ok(()),
-            Self::ensure_valid_byte_len(
-                width,
-                height,
-                pixel_elements,
-                (vtable.bytes_per_primitive)()
-            ),
-            "The buffer size of the raw parts overflows usize"
-        );
-        Self {
+        // Not dropped, if a check panics, as the caller still owns the raw parts
+        let channel = ManuallyDrop::new(Self {
             ptr,
             width,
             height,
@@ -301,7 +294,18 @@ impl<'a> DynamicImageChannelView<'a> {
             data,
             pixel_elements,
             lifetime: PhantomData,
-        }
+        });
+        debug_assert_eq!(
+            Ok(()),
+            Self::ensure_valid_byte_len(width, height, pixel_elements, channel.primitive_size()),
+            "The buffer size of the raw parts overflows usize"
+        );
+        debug_assert!(
+            channel.primitive_alignment().is_power_of_two()
+                && ptr.addr() % channel.primitive_alignment().get() == 0,
+            "The pointer of the raw parts isn't aligned to vtable.primitive_alignment"
+        );
+        ManuallyDrop::into_inner(channel)
     }
 
     /// Read access to the buffer pointer, e.g. to support a custom storage or implement
@@ -350,14 +354,42 @@ impl<'a> DynamicImageChannelView<'a> {
 
     /// Size of a single primitive in bytes
     #[must_use]
-    pub fn bytes_per_primitive(&self) -> NonZeroUsize {
-        (self.vtable.bytes_per_primitive)()
+    pub fn primitive_size(&self) -> NonZeroUsize {
+        // Safety: The vtable is able to work with the channel
+        unsafe { (self.vtable.primitive_size)(self) }
     }
 
-    /// `pixel_elements` and `bytes_per_primitive` of the channel
+    /// Alignment in bytes, which every buffer of the channel is aligned to
+    #[must_use]
+    pub fn primitive_alignment(&self) -> NonZeroUsize {
+        // Safety: The vtable is able to work with the channel
+        unsafe { (self.vtable.primitive_alignment)(self) }
+    }
+
+    /// Debug check of the constraints of [`ImageChannelVTable`](crate::ImageChannelVTable) for
+    /// `self`, which was created by `operation` (`clone` or `make_mut`) of a channel with
+    /// `layout`
+    #[cfg(debug_assertions)]
+    fn debug_assert_derived_layout(&self, layout: PixelLayout, operation: &str) {
+        let derived = self.pixel_layout();
+        assert!(
+            derived.fits(layout),
+            "vtable.{operation} changed the layout from {layout} to {derived}"
+        );
+        assert!(
+            self.ptr.addr() % derived.primitive_alignment.get() == 0,
+            "vtable.{operation} returned a buffer, which isn't aligned to primitive_alignment"
+        );
+    }
+
+    /// `pixel_elements`, `primitive_size` and `primitive_alignment` of the channel
     #[must_use]
     pub fn pixel_layout(&self) -> PixelLayout {
-        PixelLayout::new(self.pixel_elements, self.bytes_per_primitive())
+        PixelLayout::new(
+            self.pixel_elements,
+            self.primitive_size(),
+            self.primitive_alignment(),
+        )
     }
 
     #[must_use]
@@ -438,13 +470,17 @@ impl<'a> DynamicImageChannelView<'a> {
 
     /// Calls `vtable.make_mut`, so the buffer is exclusively owned by the channel afterwards
     pub(crate) fn make_exclusive(&mut self) {
+        #[cfg(debug_assertions)]
+        let layout = self.pixel_layout();
         // Safety: The vtable is able to work with the channel
         unsafe { (self.vtable.make_mut)(self) };
+        #[cfg(debug_assertions)]
+        self.debug_assert_derived_layout(layout, "make_mut");
     }
 
     #[must_use]
     pub fn buffer_flat_bytes(&self) -> &[u8] {
-        let len = self.len_flat() * self.bytes_per_primitive().get();
+        let len = self.len_flat() * self.primitive_size().get();
         // Safety: The buffer is initialized (invariant of the channel)
         unsafe { slice::from_raw_parts(self.ptr, len) }
     }
@@ -527,14 +563,7 @@ impl<'a> DynamicImageChannelView<'a> {
 
     /// Fails with the reason, if the buffer can't be viewed as `TP`
     pub fn ensure_fits_pixel<TP: PixelType>(&self) -> Result<(), IncompatibleChannelError> {
-        if self.pixel_elements() == TP::ELEMENTS
-            && self.ensure_fits_primitive::<TP::Primitive>().is_ok()
-        {
-            Ok(())
-        } else {
-            let required = PixelLayout::of::<TP>();
-            Err(self.incompatible_error::<TP, TP::Primitive>(required))
-        }
+        self.ensure_fits_layout::<TP>(PixelLayout::of::<TP>())
     }
 
     /// Fails with the reason, if the flat buffer can't be viewed as `T`. In contrast to
@@ -542,38 +571,39 @@ impl<'a> DynamicImageChannelView<'a> {
     pub(crate) fn ensure_fits_primitive<T: PixelTypePrimitive>(
         &self,
     ) -> Result<(), IncompatibleChannelError> {
-        if self.bytes_per_primitive().get() == size_of::<T>() && self.ptr.cast::<T>().is_aligned() {
-            Ok(())
-        } else {
-            let required = PixelLayout::of_primitive::<T>(self.pixel_elements());
-            Err(self.incompatible_error::<T, T>(required))
-        }
+        self.ensure_fits_layout::<T>(PixelLayout::of_primitive::<T>(self.pixel_elements()))
     }
 
-    /// Describes, why the buffer can't be viewed as `TTarget` with the primitive `TPrimitive`
-    fn incompatible_error<TTarget, TPrimitive>(
+    /// Fails with the reason, if the channel doesn't fit the `required` layout of `TTarget`.
+    /// The alignment of the channel is guaranteed for all of its buffers, so typed views stay
+    /// aligned, when `clone` or `make_mut` of the vtable reallocate.
+    fn ensure_fits_layout<TTarget>(
         &self,
         required: PixelLayout,
-    ) -> IncompatibleChannelError {
-        IncompatibleChannelError {
-            actual: self.pixel_layout(),
-            required: Some(required),
-            aligned: self.ptr.cast::<TPrimitive>().is_aligned(),
-            target_pixel_type: std::any::type_name::<TTarget>(),
+    ) -> Result<(), IncompatibleChannelError> {
+        let actual = self.pixel_layout();
+        if actual.fits(required) {
+            Ok(())
+        } else {
+            Err(IncompatibleChannelError {
+                actual,
+                required: Some(required),
+                target_pixel_type: std::any::type_name::<TTarget>(),
+            })
         }
     }
 
     /// Checks that the size of the buffer in bytes (`width * height * pixel_elements *
-    /// bytes_per_primitive`) doesn't overflow `usize`, which [`DynamicImageChannelView::from_raw_parts`]
+    /// primitive_size`) doesn't overflow `usize`, which [`DynamicImageChannelView::from_raw_parts`]
     /// requires
     fn ensure_valid_byte_len(
         width: NonZeroU32,
         height: NonZeroU32,
         pixel_elements: NonZeroU8,
-        bytes_per_primitive: NonZeroUsize,
+        primitive_size: NonZeroUsize,
     ) -> Result<(), OverflowBufferLenError> {
         let len = Self::flat_len_checked(width, height, pixel_elements, NonZeroU8::MIN)?;
-        len.checked_mul(bytes_per_primitive.get())
+        len.checked_mul(primitive_size.get())
             .map(drop)
             .ok_or(OverflowBufferLenError::new(
                 width,
@@ -628,16 +658,19 @@ impl Drop for DynamicImageChannelView<'_> {
 impl Clone for DynamicImageChannelView<'_> {
     fn clone(&self) -> Self {
         // Safety: The vtable is able to work with the channel
-        unsafe { (self.vtable.clone)(self) }
+        let clone = unsafe { (self.vtable.clone)(self) };
+        #[cfg(debug_assertions)]
+        clone.debug_assert_derived_layout(self.pixel_layout(), "clone");
+        clone
     }
 }
 
-/// Channels are equal, if their dimensions, `pixel_elements`, `bytes_per_primitive` and bytes are equal
+/// Channels are equal, if their dimensions, `pixel_elements`, `primitive_size` and bytes are equal
 impl PartialEq for DynamicImageChannelView<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.dimensions() == other.dimensions()
             && self.pixel_elements() == other.pixel_elements()
-            && self.bytes_per_primitive() == other.bytes_per_primitive()
+            && self.primitive_size() == other.primitive_size()
             && self.buffer_flat_bytes() == other.buffer_flat_bytes()
     }
 }
@@ -647,7 +680,7 @@ impl Debug for DynamicImageChannelView<'_> {
         f.debug_struct("DynamicImageChannel")
             .field("width", &self.width())
             .field("height", &self.height())
-            .field("bytes_per_primitive", &self.bytes_per_primitive())
+            .field("primitive_size", &self.primitive_size())
             .field("pixel_elements", &self.pixel_elements())
             .finish()
     }
@@ -899,7 +932,7 @@ mod tests {
     }
 
     #[test]
-    fn image_with_other_bytes_per_primitive_is_not_uniform() -> TestResult {
+    fn image_with_other_primitive_size_is_not_uniform() -> TestResult {
         let ch1 = ImageChannel::<u8>::new_vec(vec![1], NZ_1, NZ_1)?;
         let ch2 = ImageChannel::<u16>::new_vec(vec![1], NZ_1, NZ_1)?;
         let dynamic = DynamicImage::from_channels(ch1.into(), [ch2.into()]);
@@ -939,9 +972,9 @@ mod tests {
     }
 
     #[test]
-    fn buffer_flat_checks_bytes_per_primitive() -> TestResult {
+    fn buffer_flat_checks_primitive_size() -> TestResult {
         let channel = DynamicImageChannel::new_vec(vec![[1u16, 2]], NZ_1, NZ_1)?;
-        assert_eq!(channel.bytes_per_primitive().get(), 2);
+        assert_eq!(channel.primitive_size().get(), 2);
         assert_eq!(channel.len_flat(), 2);
         assert_eq!(channel.buffer_flat::<u16>(), Ok(&[1, 2][..]));
         assert_matches!(channel.buffer_flat::<u8>(), Err(_));
@@ -1137,7 +1170,7 @@ mod tests {
         let rgb = Image::<[u8; 3], 1>::new_vec(vec![[1u8, 2, 3]], NZ_1, NZ_1)?;
         let dynamic = DynamicImage::from(rgb);
         assert_eq!(1, dynamic.channels.len());
-        assert_eq!(1, dynamic[0].bytes_per_primitive().get());
+        assert_eq!(1, dynamic[0].primitive_size().get());
         assert_eq!(3, dynamic[0].pixel_elements().get());
         assert_eq!(Ok([[1u8, 2, 3]].as_slice()), dynamic[0].buffer::<[u8; 3]>());
         let rgb_back: Image<[u8; 3], 1> = dynamic.try_into()?;
@@ -1190,17 +1223,21 @@ mod tests {
                     IncompatibleImageError::Channel(IncompatibleChannelError {
                         actual: PixelLayout {
                             elements: NonZeroU8::MIN,
-                            bytes_per_primitive: NonZeroUsize::MIN
+                            primitive_size: NonZeroUsize::MIN,
+                            primitive_alignment: NonZeroUsize::MIN
                         },
                         required: Some(PixelLayout {
                             elements: NonZeroU8::MIN,
-                            bytes_per_primitive: second_bytes_per_primitive
+                            primitive_size: second_primitive_size,
+                            primitive_alignment: second_primitive_alignment
                         }),
                         target_pixel_type: "u16",
                         ..
                     }),
                 ..
-            }) if image == DynamicImage::from(luma) && second_bytes_per_primitive.get() == 2
+            }) if image == DynamicImage::from(luma)
+                && second_primitive_size.get() == 2
+                && second_primitive_alignment.get() == 2
         );
         Ok(())
     }
@@ -1214,15 +1251,16 @@ mod tests {
             Err(IncompatibleImageError::Channel(IncompatibleChannelError {
                 actual: PixelLayout {
                     elements: NZ_U8_3,
-                    bytes_per_primitive: first_bytes_per_primitive
+                    primitive_size: first_primitive_size,
+                    primitive_alignment: NonZeroUsize::MIN
                 },
                 required: Some(PixelLayout {
                     elements: NonZeroU8::MIN,
-                    bytes_per_primitive: NonZeroUsize::MIN
+                    primitive_size: NonZeroUsize::MIN,
+                            primitive_alignment: NonZeroUsize::MIN
                 }),
-                aligned: true,
                 target_pixel_type: "u8",
-            })) if first_bytes_per_primitive.get() == 1
+            })) if first_primitive_size.get() == 1
         );
         Ok(())
     }

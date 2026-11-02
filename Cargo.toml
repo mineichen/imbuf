@@ -9,13 +9,14 @@ members = [
 [workspace.package]
 authors = ["mineichen"]
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "MPL-2.0"
 repository = "https://github.com/mineichen/imbuf"
 
 [workspace.dependencies]
 assert_matches = "1"
 bytemuck = { version = "1", default-features = false }
+fearless_simd = "1.2"
 imbuf = { path = "imbuf", version = "0.4.0" }
 #imbuf-image = { path = "imbuf-image", version = "0.1.0" }
 #imbuf-opencv = { path = "imbuf-opencv", version = "0.1.0" }

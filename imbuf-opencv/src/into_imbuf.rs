@@ -78,6 +78,14 @@ fn dynamic_image<P: PixelTypePrimitive + Pod>(mat: Mat) -> opencv::Result<Dynami
             "Mat is not continuous",
         ));
     }
+    // The vtable guarantees buffers, which are aligned for P. Mats allocated by OpenCV are,
+    // but Mats over external data might not be. Planes start at multiples of size_of::<P>().
+    if !mat.data().cast::<P>().is_aligned() {
+        return Err(opencv::Error::new(
+            Code::StsUnsupportedFormat.into(),
+            "Mat data is not aligned for its depth",
+        ));
+    }
 
     if dims == 2 {
         let width = nonzero_dimension(mat.cols())?;
@@ -155,12 +163,14 @@ const fn vtable<P: PixelTypePrimitive + Pod>() -> &'static ImageChannelVTable {
         clone: clone_mat_channel::<P>,
         make_mut: make_mat_channel_mut::<P>,
         drop: drop_mat_channel,
-        bytes_per_primitive: bytes_per_primitive::<P>,
+        primitive_size: primitive_size::<P>,
+        primitive_alignment: primitive_alignment::<P>,
     }
 }
 
 /// # Safety
-/// `mat` must be continuous and hold `width * height * pixel_elements` values of `P`
+/// `mat` must be continuous, aligned for `P` and hold `width * height * pixel_elements` values
+/// of `P`
 unsafe fn into_channel<P: PixelTypePrimitive + Pod>(
     mat: Mat,
     width: NonZeroU32,
@@ -190,8 +200,14 @@ fn planar_channel<P: PixelTypePrimitive + Pod>(
     Ok(unsafe { into_channel::<P>(view, width, height, NonZeroU8::MIN) })
 }
 
-extern "C-unwind" fn bytes_per_primitive<P>() -> NonZeroUsize {
+unsafe extern "C-unwind" fn primitive_size<P>(_: &DynamicImageChannelView<'_>) -> NonZeroUsize {
     const { NonZeroUsize::new(size_of::<P>()).expect("Primitives are not zero sized") }
+}
+
+unsafe extern "C-unwind" fn primitive_alignment<P>(
+    _: &DynamicImageChannelView<'_>,
+) -> NonZeroUsize {
+    const { NonZeroUsize::new(align_of::<P>()).expect("Alignments are never zero") }
 }
 
 unsafe extern "C-unwind" fn clone_mat_channel<'a, P: PixelTypePrimitive + Pod>(

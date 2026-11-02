@@ -6,10 +6,10 @@ use std::{
 
 use crate::{
     DynamicImageChannelView, IncompatibleImage, InvalidLenError,
-    channel::{ImageChannel, ImageChannelView},
+    channel::ImageChannelView,
     error::IncompatibleImageError,
     pixel::{PixelType, PixelTypePrimitive},
-    unwrap_usize_to_nonzero_u8,
+    shared_vec, transpose, unwrap_usize_to_nonzero_u8,
 };
 
 /// [`ImageView`] which owns its buffers (or shares them with other owners)
@@ -28,60 +28,6 @@ pub struct ImageView<'a, T: PixelType, const CHANNELS: usize>([ImageChannelView<
 impl<T: PixelType, const CHANNELS: usize> PartialEq for ImageView<'_, T, CHANNELS> {
     fn eq(&self, other: &Self) -> bool {
         self.0.iter().zip(other.0.iter()).all(|(a, b)| a == b)
-    }
-}
-
-#[allow(clippy::len_without_is_empty)]
-impl<const CHANNELS: usize, T: PixelType> Image<T, CHANNELS> {
-    #[must_use]
-    #[allow(clippy::missing_panics_doc)]
-    pub fn from_interleaved(i: &ImageView<'_, [T; CHANNELS], 1>) -> Self
-    where
-        T: PixelTypePrimitive + Copy,
-    {
-        let (width, height) = i.dimensions();
-        Self::from_flat_interleaved(i.buffer_flat(), width, height)
-            .expect("The buffer of an image matches its dimensions")
-    }
-
-    pub fn from_flat_interleaved(
-        v: &[T],
-        width: NonZeroU32,
-        height: NonZeroU32,
-    ) -> Result<Self, InvalidLenError>
-    where
-        T: Copy,
-    {
-        if CHANNELS == 1 {
-            return Self::new_vec(v.to_vec(), width, height);
-        }
-
-        Self::ensure_valid_len(width, height, v.len())?;
-
-        // Todo: Change interleaved to planar should be done inline instead of new vec
-        let mut write_buf_container = vec![std::mem::MaybeUninit::<T>::uninit(); v.len()];
-
-        let mut next_read = 0;
-
-        // The buffer length is checked above to be `width * height * CHANNELS`, so the division
-        // is exact and `i * len` cannot overflow
-        let len = v.len() / CHANNELS;
-        let write_offsets: [_; CHANNELS] = std::array::from_fn(|i| i * len);
-
-        for pixel in 0..len {
-            for (i, write_offset) in write_offsets.iter().enumerate() {
-                unsafe {
-                    write_buf_container
-                        .get_unchecked_mut(pixel + write_offset)
-                        .write(*v.get_unchecked(next_read + i));
-                }
-            }
-            next_read += CHANNELS;
-        }
-        let x = unsafe {
-            std::mem::transmute::<Vec<std::mem::MaybeUninit<T>>, Vec<T>>(write_buf_container)
-        };
-        Image::<T, CHANNELS>::new_vec(x, width, height)
     }
 }
 
@@ -308,74 +254,64 @@ impl<'a, T: PixelType> ImageView<'a, T, 1> {
     }
 }
 
-impl<const PIXEL_ELEMENTS: usize, T: PixelTypePrimitive> Image<[T; PIXEL_ELEMENTS], 1> {
+impl<T: PixelTypePrimitive, const CHANNELS: usize> ImageView<'_, T, CHANNELS> {
+    /// Interleaves the planar channels into a single channel with one element per channel in
+    /// each pixel (e.g. planar RGB into `[u8; 3]` pixels). `transpose` of the result restores the
+    /// planar image.
+    ///
+    /// The buffer is transposed in place without copying, if the channels exclusively own a
+    /// single planar buffer (e.g. created by [`Image::new_vec`] and not cloned). A single channel
+    /// is reused, if it exclusively owns a `Vec`. Otherwise, the pixels are copied (e.g. for
+    /// [`ImageView::view`]).
+    ///
+    /// # Panics
+    /// If the channels have different numbers of pixels (e.g. after replacing a channel with
+    /// [`ImageView::first_mut`]).
+    #[must_use]
+    pub fn transpose(self) -> Image<[T; CHANNELS], 1> {
+        let (width, height) = self.dimensions();
+        let interleaved = if CHANNELS == 1 {
+            // A single channel is planar and interleaved at the same time
+            let channel = self.0.into_iter().next().expect("CHANNELS == 1");
+            channel.into_vec_flat()
+        } else {
+            match shared_vec::try_into_vec(self.0) {
+                Ok(mut buffer) => {
+                    transpose::interleave_in_place::<T, CHANNELS>(&mut buffer);
+                    buffer
+                }
+                Err(channels) => {
+                    let pixels =
+                        transpose::interleave(channels.each_ref().map(ImageChannelView::buffer));
+                    crate::pixel::flat_vec(pixels)
+                }
+            }
+        };
+        Image::new_vec_flat(interleaved, width, height)
+            .expect("The planes have `width * height` elements")
+    }
+}
+
+impl<T: PixelTypePrimitive, const PIXEL_ELEMENTS: usize> ImageView<'_, [T; PIXEL_ELEMENTS], 1> {
+    /// Splits the pixels into one planar channel per pixel element (e.g. `[u8; 3]` pixels into
+    /// planar RGB). `transpose` of the result restores the interleaved image.
+    ///
+    /// The buffer is transposed in place without copying, if the channel exclusively owns a `Vec`
+    /// (e.g. created by [`Image::new_vec`]). Otherwise, the pixels are copied (e.g. for
+    /// [`ImageView::view`]).
     #[must_use]
     #[allow(clippy::missing_panics_doc)]
-    pub fn from_planar_image<const CHANNELS: usize>(i: &ImageView<'_, T, CHANNELS>) -> Self
-    where
-        T: Copy,
-    {
-        let (width, height) = i.dimensions();
-        Self::from_planar(i.buffers(), width, height)
-            .expect("The buffers of an image match its dimensions")
-    }
-
-    #[allow(clippy::missing_panics_doc)]
-    pub fn from_planar<const CHANNELS: usize>(
-        channels: [&[T]; CHANNELS],
-        width: NonZeroU32,
-        height: NonZeroU32,
-    ) -> Result<Self, InvalidLenError>
-    where
-        T: Copy,
-    {
-        for channel in channels {
-            DynamicImageChannelView::ensure_valid_len(width, height, channel.len())?;
-        }
-
-        if CHANNELS == 1 {
-            let mut data_vec = Vec::with_capacity(channels[0].len());
-            for &val in channels[0] {
-                data_vec.push([val; PIXEL_ELEMENTS]);
+    pub fn transpose(self) -> Image<T, PIXEL_ELEMENTS> {
+        let (width, height) = self.dimensions();
+        let [channel] = self.0;
+        let planar = match channel.try_into_vec_flat() {
+            Ok(mut buffer) => {
+                transpose::deinterleave_in_place::<T, PIXEL_ELEMENTS>(&mut buffer);
+                buffer
             }
-            let channel = ImageChannel::new_vec(data_vec, width, height)?;
-
-            return Ok({
-                let mut arr =
-                    std::mem::MaybeUninit::<[ImageChannel<[T; PIXEL_ELEMENTS]>; 1]>::uninit();
-                unsafe {
-                    std::ptr::write(arr.as_mut_ptr().cast(), channel);
-                    Self(arr.assume_init())
-                }
-            });
-        }
-
-        // Each channel is checked above to be `width * height` long
-        let len = channels[0].len();
-        let mut channel_iters = channels.map(|c| c.iter());
-
-        let mut data_vec = vec![std::mem::MaybeUninit::<[T; PIXEL_ELEMENTS]>::uninit(); len];
-        for dst in &mut data_vec {
-            let mut value = [std::mem::MaybeUninit::<T>::uninit(); PIXEL_ELEMENTS];
-
-            for (src, dst) in channel_iters
-                .iter_mut()
-                .map(|c| {
-                    c.next()
-                        .expect("Channels are checked above to have the same length")
-                })
-                .zip(value.iter_mut())
-            {
-                dst.write(*src);
-            }
-
-            dst.write(value.map(|x| unsafe { x.assume_init() }));
-        }
-        let data_vec_init: Vec<[T; PIXEL_ELEMENTS]> = unsafe { std::mem::transmute(data_vec) };
-        let data = std::sync::Arc::from(data_vec_init);
-
-        let image = ImageChannel::new_arc(data, width, height)?;
-        Ok(Self([image]))
+            Err(channel) => transpose::deinterleave(channel.buffer()),
+        };
+        Image::new_vec(planar, width, height).expect("The channel has `width * height` pixels")
     }
 }
 
@@ -436,6 +372,7 @@ mod tests {
     use testresult::TestResult;
 
     use super::*;
+    use crate::ImageChannel;
 
     const NZ_1: NonZeroU32 = NonZeroU32::MIN;
     const NZ_2: NonZeroU32 = NonZeroU32::new(2).unwrap();
@@ -595,38 +532,137 @@ mod tests {
         Ok(())
     }
 
+    /// Checks that the buffer was reused (e.g. transposed in place). Miri creates a new address
+    /// for each use of a generic function, so the storage of a channel isn't detected and the
+    /// buffer is copied instead (see `miri_to_vec_reuses_pointer`).
+    fn assert_reused(buffer: *const u8, original: *const u8) {
+        if !cfg!(miri) {
+            assert_eq!(buffer, original, "The buffer is reused");
+        }
+    }
+
     #[test]
-    fn from_planar_image() -> TestResult {
+    fn transpose_planar_image() -> TestResult {
         let image = crate::Image::<u8, 3>::new_vec((0..12).collect(), NZ_2, NZ_2)?;
-        let interleaved_image = crate::Image::<[u8; 3], 1>::from_planar_image(&image);
+        let ptr = image.first().buffer().as_ptr();
+        let interleaved_image: Image<[u8; 3], 1> = image.transpose();
         assert_eq!(
             interleaved_image.buffer(),
             &[[0u8, 4, 8], [1, 5, 9,], [2, 6, 10,], [3, 7, 11]]
         );
         assert_eq!(interleaved_image.dimensions(), (NZ_2, NZ_2));
+        assert_reused(interleaved_image.buffer_flat().as_ptr(), ptr);
         Ok(())
     }
 
     #[test]
-    fn luma_from_planar() -> TestResult {
+    fn transpose_planar_luma() -> TestResult {
         let image = crate::Image::<u8, 1>::new_vec(vec![0u8, 64, 128, 192], NZ_2, NZ_2)?;
-        let planar_image = Image::<[u8; 1], 1>::from_planar_image(&image);
+        let ptr = image.buffer().as_ptr();
+        let planar_image: Image<[u8; 1], 1> = image.transpose();
         assert_eq!(planar_image.buffer(), &[[0u8], [64u8], [128u8], [192u8]]);
+        assert_reused(planar_image.buffer_flat().as_ptr(), ptr);
         Ok(())
     }
 
     #[test]
-    fn luma_from_interleaved() -> TestResult {
-        let interleaved_image =
-            crate::Image::from_flat_interleaved(&[0u8, 64, 128, 192], NZ_2, NZ_2)?;
-        assert_eq!(interleaved_image.buffers(), [[0u8, 64, 128, 192]]);
-        assert_eq!(interleaved_image.dimensions(), (NZ_2, NZ_2));
+    fn miri_transpose_interleaved_in_place() -> TestResult {
+        let image = Image::<[u8; 3], 1>::new_vec(vec![[0, 1, 2], [3, 4, 5]], NZ_2, NZ_1)?;
+        let ptr = image.buffer_flat().as_ptr();
+        let clone = image.clone();
+
+        let planar = image.transpose();
+        assert_eq!(planar.buffers(), [[0, 3], [1, 4], [2, 5]]);
+        assert_reused(planar.first().buffer().as_ptr(), ptr);
+        assert_eq!(planar.dimensions(), (NZ_2, NZ_1));
+        assert_eq!(clone.buffer(), &[[0, 1, 2], [3, 4, 5]]);
+
+        let interleaved = planar.transpose();
+        assert_eq!(interleaved, clone);
+        assert_reused(interleaved.buffer_flat().as_ptr(), ptr);
         Ok(())
     }
+
     #[test]
-    fn from_flat_interleaved_image() -> TestResult {
-        let image: crate::Image<u8, 3> =
-            Image::from_flat_interleaved((0..12).collect::<Vec<_>>().as_slice(), NZ_2, NZ_2)?;
+    fn miri_transpose_copies_shared_planar_buffer() -> TestResult {
+        let image = Image::<u8, 2>::new_vec(vec![0, 1, 2, 3], NZ_2, NZ_1)?;
+        let ptr = image.first().buffer().as_ptr();
+        let channel = image.first().clone();
+
+        let interleaved = image.clone().transpose();
+        assert_eq!(interleaved.buffer(), &[[0, 2], [1, 3]]);
+        assert_ne!(interleaved.buffer_flat().as_ptr(), ptr);
+        assert_eq!(image.buffers(), [[0, 1], [2, 3]]);
+
+        drop(image);
+        // The cloned channel still shares the buffer
+        let [_, second] = Image::<u8, 2>::new_vec(vec![4, 5, 6, 7], NZ_2, NZ_1)?.into_channels();
+        let mixed = Image::try_from([channel.clone(), second])?.transpose();
+        assert_eq!(mixed.buffer(), &[[0, 6], [1, 7]]);
+        assert_eq!(channel.buffer(), &[0, 1]);
+        Ok(())
+    }
+
+    #[test]
+    fn miri_transpose_keeps_channel_order() -> TestResult {
+        let image = Image::<u8, 3>::new_vec(vec![0, 1, 2, 3, 4, 5], NZ_2, NZ_1)?;
+        let [r, g, b] = image.into_channels();
+        let bgr = Image::try_from([b, g, r])?;
+        assert_eq!(bgr.transpose().buffer(), &[[4, 2, 0], [5, 3, 1]]);
+        Ok(())
+    }
+
+    #[test]
+    fn miri_transpose_copies_borrowed_images() -> TestResult {
+        let planar = Image::<u16, 2>::new_vec(vec![0, 1, 2, 3], NZ_1, NZ_2)?;
+        assert_eq!(planar.view().transpose().buffer(), &[[0, 2], [1, 3]]);
+        assert_eq!(planar.buffers(), [[0, 1], [2, 3]]);
+
+        let data = [[0u16, 1], [2, 3]];
+        let interleaved = ImageView::<[u16; 2], 1>::new_slice(&data, NZ_1, NZ_2)?;
+        assert_eq!(interleaved.transpose().buffers(), [[0, 2], [1, 3]]);
+        assert_eq!(data, [[0, 1], [2, 3]]);
+        Ok(())
+    }
+
+    #[test]
+    fn transpose_large_image_in_place() -> TestResult {
+        // Exceeds the tiles of the in-place transposition
+        let (width, height) = (
+            NonZeroU32::new(97).ok_or("zero")?,
+            NonZeroU32::new(61).ok_or("zero")?,
+        );
+        let len = 97 * 61;
+        let planar = (0..3 * len)
+            .map(|i| u8::try_from(i % 251))
+            .collect::<Result<Vec<_>, _>>()?;
+        let expected = (0..len)
+            .map(|i| [planar[i], planar[len + i], planar[2 * len + i]])
+            .collect::<Vec<_>>();
+
+        let image = Image::<u8, 3>::new_vec(planar.clone(), width, height)?;
+        let interleaved = image.transpose();
+        assert_eq!(interleaved.buffer(), expected);
+        assert_eq!(interleaved.transpose().into_vec(), planar);
+        Ok(())
+    }
+
+    #[test]
+    fn transpose_interleaved_luma() -> TestResult {
+        let interleaved = Image::<[u8; 1], 1>::new_vec(vec![[0], [64], [128], [192]], NZ_2, NZ_2)?;
+        let ptr = interleaved.buffer_flat().as_ptr();
+        let planar = interleaved.transpose();
+        assert_eq!(planar.buffers(), [[0u8, 64, 128, 192]]);
+        assert_eq!(planar.dimensions(), (NZ_2, NZ_2));
+        assert_reused(planar.buffer().as_ptr(), ptr);
+        Ok(())
+    }
+
+    #[test]
+    fn planar_from_borrowed_interleaved_buffer() -> TestResult {
+        let data = (0..12).collect::<Vec<u8>>();
+        let interleaved = ImageView::<[u8; 3], 1>::new_slice(data.as_chunks().0, NZ_2, NZ_2)?;
+        let image: Image<u8, 3> = interleaved.transpose();
         assert_eq!(
             image.buffers(),
             [[0u8, 3, 6, 9], [1, 4, 7, 10], [2, 5, 8, 11]]

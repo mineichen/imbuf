@@ -24,8 +24,8 @@
           # Update both together.
           rustMsrv = with inputs.fenix.packages.${system}; combine [
             (toolchainOf {
-              channel = "1.88.0";
-              sha256 = "sha256-Qxt8XAuaUR2OMdKbN4u8dBJOhSHxS+uS06Wl9+flVEk=";
+              channel = "1.89.0";
+              sha256 = "sha256-+9FmLhAOezBZCOziO0Qct1NOrfpjNsXxc/8I0c7BdKE=";
             }).toolchain
           ];
           rustNightlyWithMiri = with inputs.fenix.packages.${system}; combine [
@@ -92,6 +92,21 @@
             map (dir: "-C link-arg=-Wl,-rpath,${dir}")
               (pkgs.lib.splitString ":" opencvEnvVars.LD_LIBRARY_PATH)
           );
+          # Mirrors rust-analyzer-lsp@claude-plugins-official, which only declares the server.
+          # Built into the image, because /root/.claude isn't persisted between runs.
+          rustAnalyzerLspPlugin = pkgs.writeTextDir "rust-analyzer-lsp/.claude-plugin/plugin.json"
+            (builtins.toJSON {
+              name = "rust-analyzer-lsp";
+              description = "Rust language server for code intelligence and analysis";
+              version = "1.0.0";
+              lspServers.rust-analyzer = {
+                command = "${rust}/bin/rust-analyzer";
+                extensionToLanguage.".rs" = "rust";
+              };
+            });
+          claudeCodeWithLsp = pkgs.writeShellScriptBin "claude" ''
+            exec ${pkgs.claude-code}/bin/claude --plugin-dir ${rustAnalyzerLspPlugin}/rust-analyzer-lsp "$@"
+          '';
           policy = pkgs.writeText "policy.json" ''{"default":[{"type":"insecureAcceptAnything"}]}'';
           containername = "imbuf-isolated-dev";
           podmanRuntimePath = pkgs.lib.makeBinPath [
@@ -198,7 +213,7 @@
                 pkgs.ripgrep
                 pkgs.git
                 pkgs.opencode
-                pkgs.claude-code
+                claudeCodeWithLsp
                 pkgs.busybox
                 pkgs.cargo-tarpaulin
                 (pkgs.writeScriptBin "entrypoint.sh" ''

@@ -9,6 +9,7 @@ mod error;
 mod image;
 mod pixel;
 mod shared_vec;
+mod transpose;
 mod vec;
 mod view;
 

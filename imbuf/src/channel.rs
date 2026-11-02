@@ -154,7 +154,7 @@ impl<'a, TP: PixelType> ImageChannelView<'a, TP> {
     /// The fields must fulfill the invariants of [`DynamicImageChannelView::from_raw_parts`]
     /// (e.g. the buffer is valid for `'a`), except that the buffer only has to be valid for
     /// `TP::Primitive` instead of any `Pod` type. Furthermore, `ptr` must be aligned for
-    /// `TP::Primitive` and `vtable.bytes_per_primitive()` must return `size_of::<TP::Primitive>()`.
+    /// `TP::Primitive` and `vtable.primitive_size()` must return `size_of::<TP::Primitive>()`.
     pub unsafe fn new_with_vtable(
         ptr: *const TP::Primitive,
         width: NonZeroU32,
@@ -275,6 +275,13 @@ impl<'a, TP: PixelType> ImageChannelView<'a, TP> {
 
     #[must_use]
     pub fn into_vec_flat(self) -> Vec<TP::Primitive> {
+        self.try_into_vec_flat()
+            .unwrap_or_else(|channel| channel.buffer_flat().to_vec())
+    }
+
+    /// Takes the `Vec` of a channel, which is backed by one, without copying. Other channels are
+    /// returned unchanged.
+    pub(crate) fn try_into_vec_flat(self) -> Result<Vec<TP::Primitive>, Self> {
         let vtable = DynamicImageChannelView::raw_vtable(&self.0);
         let vec_drop: unsafe extern "C-unwind" fn(&mut DynamicImageChannelView<'_>) =
             crate::vec::drop_vec_channel::<TP::Primitive>;
@@ -287,10 +294,15 @@ impl<'a, TP: PixelType> ImageChannelView<'a, TP> {
             let len = self.len_flat();
             mem::forget(self);
             // Safety: The Vec-vtable stores the capacity of a Vec<TP::Primitive> in data
-            unsafe { Vec::from_raw_parts(ptr, len, capacity) }
+            Ok(unsafe { Vec::from_raw_parts(ptr, len, capacity) })
         } else {
-            self.buffer_flat().to_vec()
+            Err(self)
         }
+    }
+
+    /// The untyped channel, e.g. to inspect its storage
+    pub(crate) const fn as_dynamic(&self) -> &DynamicImageChannelView<'a> {
+        &self.0
     }
 
     #[must_use]
@@ -436,17 +448,35 @@ pub struct ImageChannelVTable {
     ) -> DynamicImageChannelView<'a>,
     /// Ensures that the buffer is exclusively owned by the channel, so it can be mutated.
     /// The entire channel can be replaced (assigning a `DynamicImageChannelView` drops the old one).
-    /// The new buffer has to be aligned for the primitive.
+    /// Like `clone`, it has to preserve `primitive_size` and `primitive_alignment` (see there).
     pub make_mut: unsafe extern "C-unwind" fn(&mut DynamicImageChannelView<'_>),
     /// Releases the buffer and `data`. The channel is not used afterwards.
     pub drop: unsafe extern "C-unwind" fn(&mut DynamicImageChannelView<'_>),
-    /// Size of the primitive in bytes. It has to return the same value on every call.
-    pub bytes_per_primitive: extern "C-unwind" fn() -> NonZeroUsize,
+    /// Size of the primitive of the channel in bytes, e.g. read from `data` for storages with a
+    /// runtime primitive type. It has to return the same value for the entire lifetime of the
+    /// channel, and channels created by `clone` and `make_mut` have to return the same value.
+    pub primitive_size: unsafe extern "C-unwind" fn(&DynamicImageChannelView<'_>) -> NonZeroUsize,
+    /// Alignment, which every buffer of the channel is guaranteed to have, as a power of two.
+    /// It's a guarantee for the current and all future buffers, not only the current pointer:
+    /// Typed views, which were checked against it, stay valid when `make_mut` reallocates.
+    /// It has to return the same value for the entire lifetime of the channel, and channels
+    /// created by `clone` and `make_mut` have to return at least the same value.
+    pub primitive_alignment:
+        unsafe extern "C-unwind" fn(&DynamicImageChannelView<'_>) -> NonZeroUsize,
 }
 
-/// `ImageChannelVTable::bytes_per_primitive` for the primitive `T`
-pub(crate) extern "C-unwind" fn bytes_per_primitive<T: PixelTypePrimitive>() -> NonZeroUsize {
-    const { NonZeroUsize::new(size_of::<T>()).expect("Zero sized primitives are not supported") }
+/// `ImageChannelVTable::primitive_size` for the primitive `T`
+pub(crate) unsafe extern "C-unwind" fn primitive_size<T: PixelTypePrimitive>(
+    _: &DynamicImageChannelView<'_>,
+) -> NonZeroUsize {
+    crate::PixelLayout::of_primitive::<T>(NonZeroU8::MIN).primitive_size
+}
+
+/// `ImageChannelVTable::primitive_alignment` for the primitive `T`
+pub(crate) unsafe extern "C-unwind" fn primitive_alignment<T: PixelTypePrimitive>(
+    _: &DynamicImageChannelView<'_>,
+) -> NonZeroUsize {
+    const { NonZeroUsize::new(align_of::<T>()).expect("Alignments are never zero") }
 }
 
 // Workaround inability to have static which uses outer Generics

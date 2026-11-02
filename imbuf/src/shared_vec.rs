@@ -1,20 +1,22 @@
 use std::{
     marker::PhantomData,
+    mem::ManuallyDrop,
     num::{NonZeroU8, NonZeroU32},
+    ptr,
     sync::atomic::{AtomicUsize, Ordering},
     vec::Vec,
 };
 
 use crate::{
-    DynamicImageChannel, DynamicImageChannelView, ImageChannel, InvalidLenError, PixelType,
-    PixelTypePrimitive,
-    channel::{ChannelFactory, ImageChannelVTable, bytes_per_primitive},
+    DynamicImageChannel, DynamicImageChannelView, ImageChannel, ImageChannelView, InvalidLenError,
+    PixelType, PixelTypePrimitive,
+    channel::{ChannelFactory, ImageChannelVTable, primitive_alignment, primitive_size},
 };
 
 /// Internal structure that holds a Vec (as raw parts) and reference counts
 /// This allows multiple `ImageChannels` to share the same Vec
 #[repr(C)]
-pub struct SharedVecData<T, const CHANNELS: usize> {
+pub(crate) struct SharedVecData<T, const CHANNELS: usize> {
     /// Pointer to the start of the Vec data
     vec: Vec<T>,
     /// Total number of `ImageChannels` using this `SharedVec` (global atomic)
@@ -138,7 +140,8 @@ impl<T: PixelTypePrimitive, const CHANNELS: usize> ChannelFactory<T>
             clone: clone_shared_vec::<T, CHANNELS>,
             make_mut: make_mut_shared_vec::<T, CHANNELS>,
             drop: drop_shared_vec::<T, CHANNELS>,
-            bytes_per_primitive: bytes_per_primitive::<T>,
+            primitive_size: primitive_size::<T>,
+            primitive_alignment: primitive_alignment::<T>,
         }
     };
 }
@@ -205,6 +208,69 @@ pub(crate) unsafe fn create_shared_channels_unchecked<TP: PixelType, const CHANN
         // Safety: The vtable is built for TP::Primitive with TP::ELEMENTS
         unsafe { ImageChannel::from_dynamic_unchecked(channel) }
     })
+}
+
+/// Takes the planar `Vec`, which `channels` share, without copying. This only succeeds, if
+/// `channels` are all channels of one [`create_shared_channels_unchecked`] call in their original
+/// order, have the same length and nothing else shares the `Vec`. Otherwise, `channels` are
+/// returned unchanged.
+pub(crate) fn try_into_vec<TP: PixelType, const CHANNELS: usize>(
+    channels: [ImageChannelView<'_, TP>; CHANNELS],
+) -> Result<Vec<TP::Primitive>, [ImageChannelView<'_, TP>; CHANNELS]> {
+    let Some(data_ptr) = exclusive_data(&channels) else {
+        return Err(channels);
+    };
+    for channel in channels {
+        let channel = ManuallyDrop::new(channel);
+        let metadata = DynamicImageChannelView::raw_data(channel.as_dynamic());
+        // Safety: The channel was created by `create_shared_channels_unchecked` (checked by
+        // `exclusive_data`), so its data is a boxed `SharedVecMetadata`. The channel isn't
+        // dropped, so its references are released by taking the `SharedVecData` below.
+        drop(unsafe {
+            Box::from_raw(metadata.cast::<SharedVecMetadata<TP::Primitive, CHANNELS>>())
+        });
+    }
+    // Safety: `channels` held all references to the data (checked by `exclusive_data`) and are
+    // gone
+    Ok(unsafe { Box::from_raw(data_ptr) }.vec)
+}
+
+/// The data of `channels`, if [`try_into_vec`] can take its `Vec`
+fn exclusive_data<TP: PixelType, const CHANNELS: usize>(
+    channels: &[ImageChannelView<'_, TP>; CHANNELS],
+) -> Option<*mut SharedVecData<TP::Primitive, CHANNELS>> {
+    let shared_vec_drop: unsafe extern "C-unwind" fn(&mut DynamicImageChannelView<'_>) =
+        drop_shared_vec::<TP::Primitive, CHANNELS>;
+    let len = channels.first()?.len_flat();
+    let mut data_ptr = None;
+    for (index, channel) in channels.iter().enumerate() {
+        let channel = channel.as_dynamic();
+        // Like `ImageChannelView::into_vec_flat`, a different pointer to the same function only
+        // causes a copy, and a merged function of another instantiation has the same layout
+        if !ptr::fn_addr_eq(
+            DynamicImageChannelView::raw_vtable(channel).drop,
+            shared_vec_drop,
+        ) || channel.len_flat() != len
+        {
+            return None;
+        }
+        // Safety: The channel was created by `create_shared_channels_unchecked` (checked above)
+        let metadata = unsafe { metadata::<TP::Primitive, CHANNELS>(channel) };
+        if metadata.slice_idx != index
+            || index.checked_mul(len) != Some(metadata.start)
+            || *data_ptr.get_or_insert(metadata.data_ptr) != metadata.data_ptr
+        {
+            return None;
+        }
+    }
+    let data_ptr = data_ptr?;
+    // Safety: The channels keep the data alive
+    let data = unsafe { &*data_ptr };
+    // Each channel holds a reference. If the total is `CHANNELS`, nothing else holds one, and
+    // nothing else can create one, as the channels are owned by the caller. Acquire synchronizes
+    // with the release of the dropped references (like `Arc::get_mut`).
+    let is_exclusive = data.total_refs.load(Ordering::Acquire) == CHANNELS;
+    (is_exclusive && len.checked_mul(CHANNELS) == Some(data.vec.len())).then_some(data_ptr)
 }
 
 /// Checks that the lengths of the channels (`width * height * pixel_elements`) and their sum

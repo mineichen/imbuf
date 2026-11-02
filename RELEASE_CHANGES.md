@@ -39,6 +39,8 @@ Pending changes for the upcoming releases of the unreleased `imbuf-image` /
 - Construct the channels for imported `Mat`s with the public
   `DynamicImageChannelView::from_raw_parts` (imbuf 0.4.0) instead of a `transmute` from
   raw parts. Requires the `imbuf` dependency 0.4.0.
+- `into_imbuf_dynamic`/`into_imbuf_specific` reject `Mat`s, whose data isn't aligned for their
+  depth (only possible for `Mat`s over external data), as imbuf requires aligned buffers.
 - Add `ImbufAsOpencv` / `ImbufAsOpencvMut` for `imbuf::DynamicImageChannel`.
   Its depth is derived from the primitive size (1 byte: `CV_8U`, 2 bytes:
   `CV_16U`, 4 bytes: `CV_32F`).

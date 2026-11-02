@@ -100,17 +100,13 @@ pub struct IncompatibleChannelCount {
 
 /// A channel can't be viewed as the target pixel type
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error(
-    "The channel ({actual}, aligned={aligned}) doesn't match {target_pixel_type} ({required:?})"
-)]
+#[error("The channel ({actual}) doesn't match {target_pixel_type} ({required:?})")]
 #[non_exhaustive]
 pub struct IncompatibleChannelError {
     pub actual: PixelLayout,
     /// Layout of the target pixel type, or `None` if there is no single target (e.g. a conversion,
     /// which supports several pixel types, but none with the `actual` layout)
     pub required: Option<PixelLayout>,
-    /// Whether the buffer is aligned for the primitive of the target pixel type
-    pub aligned: bool,
     pub target_pixel_type: &'static str,
 }
 
@@ -120,13 +116,11 @@ impl IncompatibleChannelError {
     pub const fn new(
         actual: PixelLayout,
         required: Option<PixelLayout>,
-        aligned: bool,
         target_pixel_type: &'static str,
     ) -> Self {
         Self {
             actual,
             required,
-            aligned,
             target_pixel_type,
         }
     }
@@ -138,15 +132,25 @@ impl IncompatibleChannelError {
 pub struct PixelLayout {
     pub elements: NonZeroU8,
     /// Size of a single element (primitive) of a pixel
-    pub bytes_per_primitive: NonZeroUsize,
+    pub primitive_size: NonZeroUsize,
+    /// Alignment of the primitive. For a channel, it's the alignment, which every buffer of the
+    /// channel has (see [`ImageChannelVTable::primitive_alignment`](crate::ImageChannelVTable::primitive_alignment)).
+    /// A channel can be viewed as a pixel type, if its alignment is at least the one of the pixel
+    /// type.
+    pub primitive_alignment: NonZeroUsize,
 }
 
 impl PixelLayout {
     #[must_use]
-    pub const fn new(elements: NonZeroU8, bytes_per_primitive: NonZeroUsize) -> Self {
+    pub const fn new(
+        elements: NonZeroU8,
+        primitive_size: NonZeroUsize,
+        primitive_alignment: NonZeroUsize,
+    ) -> Self {
         Self {
             elements,
-            bytes_per_primitive,
+            primitive_size,
+            primitive_alignment,
         }
     }
 
@@ -155,8 +159,20 @@ impl PixelLayout {
     }
 
     /// Layout of `pixel_elements` primitives `T` per pixel
-    pub(crate) fn of_primitive<T: PixelTypePrimitive>(pixel_elements: NonZeroU8) -> Self {
-        Self::new(pixel_elements, crate::channel::bytes_per_primitive::<T>())
+    pub(crate) const fn of_primitive<T: PixelTypePrimitive>(pixel_elements: NonZeroU8) -> Self {
+        let primitive_size = const {
+            NonZeroUsize::new(size_of::<T>()).expect("Zero sized primitives are not supported")
+        };
+        let primitive_alignment =
+            const { NonZeroUsize::new(align_of::<T>()).expect("Alignments are never zero") };
+        Self::new(pixel_elements, primitive_size, primitive_alignment)
+    }
+
+    /// Whether a channel with this layout can be viewed as a pixel type with the `required` layout
+    pub(crate) fn fits(self, required: Self) -> bool {
+        self.elements == required.elements
+            && self.primitive_size == required.primitive_size
+            && self.primitive_alignment >= required.primitive_alignment
     }
 }
 
@@ -164,8 +180,8 @@ impl Display for PixelLayout {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "pixel_elements={}, bytes_per_primitive={}",
-            self.elements, self.bytes_per_primitive
+            "pixel_elements={}, primitive_size={}, primitive_alignment={}",
+            self.elements, self.primitive_size, self.primitive_alignment
         )
     }
 }

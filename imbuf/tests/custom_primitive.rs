@@ -44,7 +44,7 @@ fn pod_primitive_round_trips_through_dynamic_image() -> TestResult {
     let data_ptr = image.buffer().as_ptr() as usize;
     let expected = image.clone();
     let dynamic = DynamicImage::from(image);
-    assert_eq!(dynamic.first().bytes_per_primitive().get(), 1);
+    assert_eq!(dynamic.first().primitive_size().get(), 1);
 
     let back = Image::<[Gray; 2], 1>::try_from(dynamic)?;
     assert_eq!(back, expected);
@@ -99,15 +99,20 @@ unsafe extern "C-unwind" fn panicking_make_mut(_: &mut DynamicImageChannelView<'
     panic!("The static buffer is read only")
 }
 unsafe extern "C-unwind" fn noop_drop(_: &mut DynamicImageChannelView<'_>) {}
-extern "C-unwind" fn four_bytes() -> NonZeroUsize {
+unsafe extern "C-unwind" fn four_bytes(_: &DynamicImageChannelView<'_>) -> NonZeroUsize {
     NZ_USIZE_4
 }
+unsafe extern "C-unwind" fn one_byte(_: &DynamicImageChannelView<'_>) -> NonZeroUsize {
+    NonZeroUsize::MIN
+}
 
+/// Vtable for `Rgba8` primitives
 static STATIC_VTABLE: ImageChannelVTable = ImageChannelVTable {
     clone: panicking_clone,
     make_mut: panicking_make_mut,
     drop: noop_drop,
-    bytes_per_primitive: four_bytes,
+    primitive_size: four_bytes,
+    primitive_alignment: one_byte,
 };
 
 /// One `Rgba8` pixel, which starts at an address which is not aligned for `f32`
@@ -149,4 +154,69 @@ fn panics_in_vtable_propagate() {
             .is_ok())),
         Err(_)
     );
+}
+
+/// Number of attempts in the alignment tests. Miri places allocations at random addresses, which
+/// are only aligned to the requested alignment. Each attempt hits a misaligned copy with a
+/// probability of ~1/4 (`Pair` → `Wide`) or ~3/16 (`Bytes4` → `f32`).
+const ALIGNMENT_ATTEMPTS: usize = 64;
+
+// The primitives of the alignment tests derive `Pod`, so the tests contain no unsafe code
+
+/// Pod primitive with 4 bytes, but only aligned to 1
+#[derive(Clone, Copy, PartialEq, Debug, bytemuck::Zeroable, bytemuck::Pod)]
+#[repr(transparent)]
+struct Bytes4([u8; 4]);
+impl PixelTypePrimitive for Bytes4 {}
+
+/// Pod primitive with 16 bytes, but only aligned to 8
+#[derive(Clone, Copy, PartialEq, Debug, bytemuck::Zeroable, bytemuck::Pod)]
+#[repr(transparent)]
+struct Pair([u64; 2]);
+impl PixelTypePrimitive for Pair {}
+
+/// Pod primitive with 16 bytes, which is aligned to 16
+#[derive(Clone, Copy, PartialEq, Debug, bytemuck::Zeroable, bytemuck::Pod)]
+#[repr(C, align(16))]
+struct Wide([u8; 16]);
+impl PixelTypePrimitive for Wide {}
+
+#[test]
+fn miri_cloning_typed_view_of_other_primitive_keeps_alignment() -> TestResult {
+    // Keep every channel alive, so Miri can't reuse an aligned address for the next allocation
+    let mut keep_alive = Vec::new();
+    for i in 0..ALIGNMENT_ATTEMPTS {
+        let value = u64::try_from(i)?;
+        let channel = ImageChannel::<Pair>::new_vec(vec![Pair([value; 2])], NZ_1, NZ_1)?;
+        let Ok(wide) = ImageChannel::<Wide>::try_from(DynamicImageChannel::from(channel)) else {
+            continue;
+        };
+        // The Vec vtable clones into an Arc<[Pair]>, which is only aligned for Pair
+        let clone = wide.clone();
+        assert!(clone.buffer().as_ptr().is_aligned());
+        assert_eq!(clone.buffer(), wide.buffer());
+        keep_alive.push((wide, clone));
+    }
+    Ok(())
+}
+
+#[test]
+fn miri_make_mut_flat_as_other_primitive_keeps_alignment() -> TestResult {
+    let mut keep_alive = Vec::new();
+    for i in 0..ALIGNMENT_ATTEMPTS {
+        let byte = u8::try_from(i)?;
+        // CHANNELS > 1 uses the SharedVec storage
+        let image = Image::<Bytes4, 2>::new_vec(vec![Bytes4([byte; 4]); 2], NZ_1, NZ_1)?;
+        let [first, _] = image.into_channels();
+        let mut channel = DynamicImageChannel::from(first);
+        // Shares the buffer, so make_mut copies into a new Vec<Bytes4>
+        let shared = channel.clone();
+        let Ok(buffer) = channel.make_mut_flat::<f32>() else {
+            continue;
+        };
+        assert!(buffer.as_ptr().is_aligned());
+        assert_eq!(buffer[0].to_ne_bytes(), [byte; 4]);
+        keep_alive.push((channel, shared));
+    }
+    Ok(())
 }
