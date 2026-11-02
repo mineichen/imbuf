@@ -6,19 +6,25 @@ views.
 
 ## Conversion model
 
-- `ImbufAsOpencv` borrows an `imbuf` image as a `Mat` view. The view points at
-  the `imbuf` allocation and cannot outlive the borrow.
-- `ImbufAsOpencvMut` provides the same view mutably; writes through the `Mat`
-  land in the `imbuf` buffer.
-- `OpencvIntoImbuf` moves an owned `Mat` into an `imbuf` image without copying
-  pixel data.
+Conversions don't copy pixels. The lifetimes keep the buffer valid:
 
-There is intentionally no conversion from an `imbuf` image to an owned `Mat`
-without copying: `OpenCV`'s allocation model cannot take ownership of an `imbuf`
-allocation. Copy the borrowed view explicitly if you need an owned `Mat`.
+- `OpencvIntoImbuf` moves an owned `Mat` into an owned `imbuf::DynamicImage`,
+  which holds the `Mat` (and its reference to the buffer).
+- `OpencvIntoImbuf` turns a `BoxedRef<'a, Mat>` or `&'a Mat` into an image,
+  which borrows the buffer for `'a` (mutable access copies it), and a
+  `BoxedRefMut<'a, Mat>` or `&'a mut Mat` into an image, which writes into the
+  mutably borrowed buffer (clones copy it).
+- `ImbufAsOpencv` borrows an `imbuf` image as a `Mat` view, `ImbufAsOpencvMut`
+  provides the same view mutably; writes through the `Mat` land in the `imbuf`
+  buffer. Like `Mat::new_rows_cols_with_data`, the view is a `BoxedRef`, which
+  can't outlive the borrow. Copy it (e.g. with `Mat::try_clone`) to keep the
+  pixels.
 
 A `Mat` represents one image channel, or one interleaved pixel with up to its
 channel limit. Multi-channel planar `imbuf::DynamicImage` values are rejected.
+Only `OpenCV` 4 is supported, as copy on write reads the reference count from the
+mirrored layouts of `cv::Mat` and `cv::UMatData` (checked against their
+accessors).
 
 ## Example
 

@@ -262,20 +262,26 @@ impl<'a> DynamicImageChannelView<'a> {
     /// # Safety
     /// The following invariants have to hold:
     /// - The size of the buffer in bytes (`width * height * pixel_elements * vtable.primitive_size()`)
-    ///   doesn't exceed `usize::MAX`, and the multiplications to calculate it don't overflow
-    ///   `usize`, which implies that `width * height * pixel_elements` matches the buffer length.
-    ///   [`DynamicImageChannelView::ensure_valid_flat_len`] checks this, e.g. for untrusted input.
+    ///   doesn't exceed `isize::MAX` (like any slice), and the multiplications to calculate it
+    ///   don't overflow, which implies that `width * height * pixel_elements` matches the buffer
+    ///   length. [`DynamicImageChannelView::ensure_valid_flat_len`] checks the length, e.g. for
+    ///   untrusted input.
     /// - `ptr` is aligned to `vtable.primitive_alignment` of the channel, which is a power of two.
     /// - `ptr` points to an initialized buffer of that size, which stays valid until `vtable.drop`
     ///   is called and at least for `'a`. The buffer can be shared between instances.
+    /// - Nothing else writes the buffer, while the channel (or a clone sharing the buffer) exists.
+    ///   The channel itself only writes it after `vtable.make_mut`, which makes it exclusive: Until
+    ///   the channel is cloned or dropped, nothing else accesses the buffer.
     /// - `vtable` is able to work with `ptr` and `data` (see [`ImageChannelVTable`](crate::ImageChannelVTable)).
     ///   Any bytes written through a `Pod` view of the buffer have to be valid for the vtable
     ///   (e.g. the primitive of the vtable is `Pod` itself).
-    /// - `ptr` and `data` can be sent to and shared between threads.
+    /// - `ptr` and `data` can be sent to and shared between threads. The functions of the vtable,
+    ///   which receive `&DynamicImageChannelView` (`clone`, `primitive_size` and
+    ///   `primitive_alignment`), can be called concurrently, as channels are `Sync`.
     ///
     /// # Panics
-    /// In debug builds, panics if `width * height * pixel_elements` or the buffer size in bytes
-    /// overflows `usize`.
+    /// In debug builds, panics if `width * height * pixel_elements` overflows `usize` or the
+    /// buffer size in bytes exceeds `isize::MAX`.
     #[must_use]
     pub unsafe fn from_raw_parts(
         ptr: *const u8,
@@ -298,7 +304,7 @@ impl<'a> DynamicImageChannelView<'a> {
         debug_assert_eq!(
             Ok(()),
             Self::ensure_valid_byte_len(width, height, pixel_elements, channel.primitive_size()),
-            "The buffer size of the raw parts overflows usize"
+            "The buffer size of the raw parts exceeds isize::MAX"
         );
         debug_assert!(
             channel.primitive_alignment().is_power_of_two()
@@ -370,7 +376,16 @@ impl<'a> DynamicImageChannelView<'a> {
     /// `self`, which was created by `operation` (`clone` or `make_mut`) of a channel with
     /// `layout`
     #[cfg(debug_assertions)]
-    fn debug_assert_derived_layout(&self, layout: PixelLayout, operation: &str) {
+    fn assert_derived_layout(
+        &self,
+        (layout, dims): (PixelLayout, (NonZeroU32, NonZeroU32)),
+        operation: &str,
+    ) {
+        assert!(
+            self.dimensions() == dims,
+            "vtable.{operation} changed the dimensions of the channel"
+        );
+
         let derived = self.pixel_layout();
         assert!(
             derived.fits(layout),
@@ -471,11 +486,11 @@ impl<'a> DynamicImageChannelView<'a> {
     /// Calls `vtable.make_mut`, so the buffer is exclusively owned by the channel afterwards
     pub(crate) fn make_exclusive(&mut self) {
         #[cfg(debug_assertions)]
-        let layout = self.pixel_layout();
+        let before = (self.pixel_layout(), self.dimensions());
         // Safety: The vtable is able to work with the channel
         unsafe { (self.vtable.make_mut)(self) };
         #[cfg(debug_assertions)]
-        self.debug_assert_derived_layout(layout, "make_mut");
+        self.assert_derived_layout(before, "make_mut");
     }
 
     #[must_use]
@@ -594,7 +609,7 @@ impl<'a> DynamicImageChannelView<'a> {
     }
 
     /// Checks that the size of the buffer in bytes (`width * height * pixel_elements *
-    /// primitive_size`) doesn't overflow `usize`, which [`DynamicImageChannelView::from_raw_parts`]
+    /// primitive_size`) doesn't exceed `isize::MAX`, which [`DynamicImageChannelView::from_raw_parts`]
     /// requires
     fn ensure_valid_byte_len(
         width: NonZeroU32,
@@ -604,6 +619,7 @@ impl<'a> DynamicImageChannelView<'a> {
     ) -> Result<(), OverflowBufferLenError> {
         let len = Self::flat_len_checked(width, height, pixel_elements, NonZeroU8::MIN)?;
         len.checked_mul(primitive_size.get())
+            .filter(|&bytes| bytes <= isize::MAX.unsigned_abs())
             .map(drop)
             .ok_or(OverflowBufferLenError::new(
                 width,
@@ -657,10 +673,12 @@ impl Drop for DynamicImageChannelView<'_> {
 
 impl Clone for DynamicImageChannelView<'_> {
     fn clone(&self) -> Self {
+        #[cfg(debug_assertions)]
+        let before = (self.pixel_layout(), self.dimensions());
         // Safety: The vtable is able to work with the channel
         let clone = unsafe { (self.vtable.clone)(self) };
         #[cfg(debug_assertions)]
-        clone.debug_assert_derived_layout(self.pixel_layout(), "clone");
+        clone.assert_derived_layout(before, "clone");
         clone
     }
 }

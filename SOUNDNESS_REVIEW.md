@@ -1,80 +1,41 @@
 # Soundness review (imbuf, imbuf-image, imbuf-opencv)
 
-## Context
+Open soundness issues of the workspace, most severe first.
 
-The user asked for a soundness review of the whole imbuf workspace (`imbuf`, `imbuf-image`, `imbuf-opencv`), with explanations before any fix. Scope covered every `unsafe` block, the vtable contract, the storages (Vec, Arc, SharedVec, Slice, SliceMut, OpenCV Mat), the owned/borrowed refactor (`cast_lifetime`, `as_view_ref`/`as_view_mut`, `From` conversions), and Send/Sync. `imbuf-image` contains no `unsafe`. Findings 1, 2, 4 and 5 already exist in `HEAD`; they are not caused by the refactor.
+## 1. `SharedVec` buffer is taken as a `Vec` of another primitive (very low, theoretical)
+`imbuf/src/shared_vec.rs` (`try_into_vec`, used by the in-place `transpose` of planar images).
+- The storage is detected by comparing the `drop` function of the vtable with `drop_shared_vec::<TP::Primitive, CHANNELS>`. rustc merges identical functions by default, so e.g. the instances for `u8` and `i8` can have the same address in optimized builds (not in Miri, where every function gets its own address).
+- Example: an `Image<u8, 3>` converted into `Image<i8, 3>` via `DynamicImage` and transposed. The `SharedVecData<u8, 3>` is then read as `SharedVecData<i8, 3>`, and its `Vec<u8>` is taken as a `Vec<i8>`.
+- The element values are fine: type changes only happen through `DynamicImage`, which requires `Pod`, and merged functions imply the same size and alignment, so the allocation is freed with the right layout. Non-`Pod` images always have the storage of their own primitive (another one requires `unsafe`).
+- What remains is the `Vec` header (pointer, capacity, length): Rust doesn't guarantee that `Vec<A>` and `Vec<B>` have the same layout. In current std it's identical for every `T` (`RawVec<T>` is a type-erased `RawVecInner` and `PhantomData<T>`), only e.g. `-Zrandomize-layout` could break it. `ImageChannelView::into_vec_flat` doesn't have this issue, as it rebuilds the `Vec` with `Vec::from_raw_parts`.
+- **Planned direction:** make `SharedVecData` generic over the container of the planar buffer, in particular `Vec<T>` and `Arc<[T]>` (see the TODO in `imbuf/src/arc.rs`):
+  - The shared data stores the buffer as raw parts, and taking it out rebuilds the container for the requested primitive (`Vec::from_raw_parts` / `Arc::from_raw`) after checking its size and alignment. No header of a `Vec` of another type is read, which resolves this issue.
+  - Planar images could then share an `Arc<[T]>` (`Image::<T, N>::new_arc` for all `N`, today only `N == 1`). `transpose` works in place, if the `Arc` is unique, and keeps the `Arc` storage: `new_arc` planar → `transpose()` → interleaved (Arc channel) → `transpose()` → planar, all on the same shared allocation.
 
-## Findings (most severe first)
+## Nits (not UB)
+- `imbuf/src/view.rs` (`slice_mut_channel`): the safety comment says the buffer is "exclusively borrowed for 'a", which isn't true for `view_mut` of a shared channel. The actual invariant is the second sentence: it's only written after `make_mut` of the original.
+- `imbuf/src/dynamic.rs` (`make_mut_flat_unchecked`): no `# Safety` section, and the comment "checked after make_mut" describes a `debug_assert!` only.
+- `imbuf/src/vec.rs`, `imbuf/src/arc.rs` (`new_vec_flat_unchecked`, `new_arc_flat_unchecked`): public `unsafe fn`s, whose safety sections describe instead of require. External callers can't use a non-`Pod` `T` soundly (only an `ImageChannel` can hide it), so the requirement should say `Pod`, or they could be `pub(crate)`.
+- `imbuf-opencv/src/from_imbuf.rs` (`create_unrestricted_mat`): ignores `P::opencv_channels()`, so a `DataType` with several channels gets a `Mat` over a part of the buffer (smaller, not UB).
 
-### 1. UB: `Image::<[T; N], 1>::from_planar` reads uninitialized memory (high)
-`imbuf/src/image.rs:433-488` (and `from_planar_image`, line 423, which forwards its `CHANNELS`).
-- `CHANNELS` and `PIXEL_ELEMENTS` are independent const generics. Only `CHANNELS == 1` is special-cased.
-- The loop `zip`s the channel iterators with `value.iter_mut()`. With `1 < CHANNELS < PIXEL_ELEMENTS`, the last `PIXEL_ELEMENTS - CHANNELS` entries of `value` are never written, and `value.map(|x| unsafe { x.assume_init() })` produces uninitialized `T`s. That is immediate UB from safe code.
-- Example: `Image::<[u8; 3], 1>::from_planar([&a[..], &b[..]], w, h)`, or `Image::<[u8; 3], 1>::from_planar_image(&Image::<u8, 2>)`.
-- With `CHANNELS > PIXEL_ELEMENTS`, surplus channels are silently dropped (not UB, but surely unintended).
-- **Fix:** add `const { assert!(CHANNELS == 1 || CHANNELS == PIXEL_ELEMENTS) }` (compile error for wrong combinations). Rewrite the interleaving loop in safe code (`std::array::from_fn(|c| channels[c][i])` per pixel, or iterators), which removes both the `MaybeUninit` and the `transmute` (finding 4).
+## Upstream: opencv-rust (not issues of imbuf-opencv)
+imbuf-opencv's views are only returned inside `BoxedRef`/`BoxedRefMut`, which limit them to the borrow, like `Mat::new_rows_cols_with_data` of opencv-rust itself, and its imports trust the `Mat` header like opencv-rust's own accessors. opencv-rust breaks both in safe code:
+- `OpenCVIntoExternContainer::opencv_into_extern_container` (public, `#[doc(hidden)]`) turns any `BoxedRef` into an owned `Mat`, which outlives the borrow.
+- More ways out of a `BoxedRef`/`BoxedRefMut` (from the review): `get_umat(ACCESS_RW)` returns an owned `UMat` over the buffer, `input_array()` + `get_mat()` an owned `Mat`, `core::swap` swaps the header into an owned `Mat`, `assign_mat` assigns it to one, `adjust_roi` returns an owned `Mat`.
+- The safe header setters (`set_rows`, `set_cols`, `set_flags`, `set_dims`, `set_u`) let a `Mat` claim more memory than its buffer. `data_typed` then reads out of bounds, and so does an imbuf image created from such a `Mat`. Possible hardening in imbuf-opencv: check `data + len <= datalimit` on import.
+- Owned `Mat`s can share a buffer (e.g. `Vector<Mat>::get` returns a shallow copy), so `data_typed_mut(&mut self)` can write under a reader of another `Mat`. The same holds for imbuf images created from `&mut Mat`/`BoxedRefMut` (written without copying). Possible hardening for `&mut Mat`: copy first, if the buffer isn't exclusive (`BoxedRefMut` of ROIs shares the buffer legitimately).
 
-### 2. UB: alignment is only checked before the vtable may reallocate (medium)
-`imbuf/src/dynamic.rs:510-525` (`make_mut_flat` / `make_mut_flat_unchecked`), `imbuf/src/channel.rs:68-77` (typed `Clone`) and `:344` (typed `make_mut_flat`).
-- A dynamic channel can be viewed as any `Pod` primitive of the same size (`try_cast(_mut)`, `TryFrom`, `make_mut_flat::<T>`). `ensure_fits_primitive` checks `T`'s alignment against the *current* pointer only.
-- `make_exclusive` and `clone` can replace the buffer (Arc copy, `copy_into_arc`, SharedVec `to_vec`, `clone_slice_into_arc_channel`). The new buffer is only aligned for the vtable's *own* primitive.
-- After that, a typed `ImageChannelBase<_, TP>` (or the `&mut [T]` from `make_mut_flat::<T>`) may be misaligned. The re-check after reallocation is only a `debug_assert!`, so release builds produce misaligned references (UB).
-- Reachable from safe code with a user-defined `Pod` primitive (e.g. `#[repr(C, align(16))]`, `#[derive(Pod)]`) of the same size as the vtable primitive but more strictly aligned. It needs an allocator or target that returns only minimally aligned memory (glibc's 16-byte malloc hides it; dlmalloc on wasm32, bump/embedded allocators don't).
-- Not reachable with the built-in std primitives (same size ⇒ same alignment on supported targets).
-- **Fix (recommended):** make alignment a static property of the storage.
-  - Add `align_of_primitive: extern "C-unwind" fn() -> NonZeroUsize` to `ImageChannelVTable`. 0.4 is unreleased, so the FFI break is acceptable.
-  - Document in `from_raw_parts`/`new_with_vtable` that `ptr` must be aligned to it.
-  - `ensure_fits_primitive::<T>` additionally requires `align_of::<T>() <= vtable align`.
-  - Typed views then stay valid across every reallocation, because every buffer a vtable produces is aligned for its primitive.
-  - Update the internal vtables (`arc.rs`, `vec.rs`, `view.rs`, `shared_vec.rs`) and `imbuf-opencv/src/into_imbuf.rs` (`align_of::<P>()`).
-  - *Alternative, no FFI change:* re-check after `make_exclusive`/`clone` and copy into a `Vec<T>` if misaligned. This is more code paths (clone, make_mut, SliceMut original) and costs runtime.
+**Next step:** file the upstream issue (draft):
 
-### 3. imbuf-opencv: borrowed `Mat`s from `as_opencv`/`as_opencv_mut` can escape the borrow (medium, upstream)
-`imbuf-opencv/src/from_imbuf.rs` (`create_unrestricted_mat` + `BoxedRef`/`BoxedRefMut`).
-- opencv-rust 0.101 doesn't implement `Deref`/`DerefMut` for `BoxedRef*`, precisely to prevent `mem::swap`.
-- But the public (`#[doc(hidden)]`) safe trait method `OpenCVIntoExternContainer::opencv_into_extern_container` turns a `BoxedRef<'_, Mat>` into an owned `Mat` (`opencv/src/boxed_ref.rs:44-50`). Our Mats point at imbuf memory without a refcount (`u == null`), so the escaped `Mat` dangles once the image is dropped (use-after-free). Through `&` borrows it can even write into memory that is shared.
-- **Fix:** none possible in imbuf-opencv without copying. Document it as a known opencv-rust limitation and report it upstream. imbuf-opencv's own internal uses (`planar_channel`, `clone_mat_channel`) are fine, because those Mats share the refcounted `UMatData`.
-
-### 4. imbuf-opencv: `MatHeader` mirrors the C++ layout of `cv::Mat` (low-medium)
-`imbuf-opencv/src/into_imbuf.rs:107-140` (`MatHeader`, `mat_buffer_is_exclusive`).
-- Reads `u` at the field offset of OpenCV 4.x. With an OpenCV whose `cv::Mat` layout differs (e.g. 5.x), `UMatData::from_raw(garbage)` is UB.
-- The `refcount` read is a plain read of a counter that other threads modify atomically. That's technically a data race, but harmless: a stale value can only cause an unnecessary copy.
-- **Fix:** before trusting `u`, cross-check the mirrored fields against the API (`flags`, `dims`, `rows`, `cols`, `data`). On any mismatch, treat the buffer as non-exclusive (copy). Optionally gate it on the OpenCV major version.
-
-### 5. `transmute::<Vec<MaybeUninit<T>>, Vec<T>>` (low)
-`imbuf/src/image.rs:210` (`from_flat_interleaved`) and `:483` (`from_planar`).
-- The layout of `Vec<A>` vs `Vec<B>` is unspecified, and the std docs advise `Vec::from_raw_parts` instead. It isn't miscompiled today, but it isn't guaranteed.
-- **Fix:** `from_planar` is covered by the rewrite in finding 1. For `from_flat_interleaved`, use `ManuallyDrop` + `Vec::from_raw_parts` (or a safe rewrite).
-
-### 6. imbuf-opencv `copied_channel` on unaligned external data (very low)
-`into_imbuf.rs:249-262`: `buffer_flat_unchecked::<P>()` assumes `P` alignment. It's only reached when `Mat::copy`/`try_clone` fail on a Mat over user-provided unaligned memory. This is resolved by finding 2's invariant ("vtable buffers are aligned for their primitive"); add the alignment check to `dynamic_image`.
-
-## Reviewed and sound (no change needed)
-- **Refactor pieces:**
-  - `cast_lifetime` (`ManuallyDrop` + field copy, no double drop).
-  - `as_view_ref`, plus `as_view_mut` (unsafe, only used for vtable calls).
-  - `From` owned→any view, `'static` view→owned.
-  - Vtable calls with a borrow lifetime, given the documented contract: `clone`/`make_mut` results stay valid as long as the input.
-  - Covariance of `Borrowed<'a>`, dropck through the generic `Drop`, sealed `BufferLifetime`.
-- **SharedVec:** per-slice/total refcounts with AcqRel/Acquire (same reasoning as `Arc`). Overflow is impossible because every clone allocates.
-- **Arc COW:** `Arc::get_mut` respects `Weak`; the `into_raw` pointer keeps write provenance.
-- **Vec:** never shared, clone copies.
-- **SliceMut `original` pointer:** an exclusive borrow for the view's lifetime. `make_original_mut` re-reads the pointer after `make_exclusive`.
-- **`into_vec_flat`** detects a Vec by function pointer identity. Sound, because merged functions imply an identical allocation layout, and false negatives only copy.
-- **Pixel casts:** `flat_vec`/`flat_slice`/`flat_arc` (`[P; N]` ↔ `P`, identical `ArcInner` layout); ZST primitives are rejected at compile time.
-- **Send/Sync** of all storages, including Mat refcounts (atomic in OpenCV).
-- **`ImageBase` equal-dimension invariant:** it can be broken via `first_mut()`, but no unsafe code depends on it. `from_planar` validates every length. Keep it that way.
-
-## Proposed implementation order
-1. Finding 1 (+5 for `from_planar`): const assert + safe interleaving. Add tests: `CHANNELS == PIXEL_ELEMENTS`, `CHANNELS == 1`, and a `compile_fail` doctest for `2 → [T; 3]`.
-2. Finding 5 for `from_flat_interleaved`: `Vec::from_raw_parts`.
-3. Finding 2: `align_of_primitive` in the vtable, `ensure_fits_primitive` against it, docs on `from_raw_parts`/`new_with_vtable`, all internal vtables + opencv. Test with a custom `#[repr(C, align(16))]` Pod primitive vs a vtable of a 16-byte, 4-aligned primitive: the cast must be rejected.
-4. Finding 4: cross-check `MatHeader` before reading `u`.
-5. Finding 3: doc note on `as_opencv`/`as_opencv_mut` + upstream issue text for the user (I won't file it myself).
-6. `Releases.md` entries for the vtable field and the `from_planar` restriction.
-
-## Verification
-- `cargo test --workspace` (imbuf, imbuf-image, imbuf-opencv), including doctests and the new `compile_fail` test.
-- `cargo clippy --workspace --all-targets`, `RUSTDOCFLAGS="-D warnings" cargo doc -p imbuf --no-deps`.
-- Miri isn't installed here: the user runs `nix run .#miri` (covers `imbuf`, `imbuf-image`), which also exercises the new `from_planar`.
-- pilatus: `cargo test --workspace` against the patched imbuf (pilatus uses `from_interleaved`/`from_planar_image`, so check that the const assert accepts its uses: `Image<u8, 3>` ↔ `[u8; 3]`).
+  > **Title:** `BoxedRef`/`BoxedRefMut` can be converted into an owned `Mat` in safe code, which outlives the borrow
+  >
+  > `BoxedRef<'a, T>` intentionally doesn't implement `Deref`, so the borrowed `Mat` can't be swapped out. But `OpenCVIntoExternContainer::opencv_into_extern_container` (public, `#[doc(hidden)]`, safe) is implemented for `BoxedRef<'_, T>` and returns the inner `T` without the lifetime. For a `Mat` created over borrowed memory (e.g. `Mat::new_rows_cols_with_data(&data)`, which returns `BoxedRef<'_, Mat>`), the result is an owned `Mat`, which points at `data` without a reference count (`u == nullptr`). After `data` is dropped, any access is a use after free, in safe code. `BoxedRefMut` additionally allows writes through the escaped `Mat` after the mutable borrow ended, and `Mat::copy` + the conversion gives two owned `Mat`s writing the same buffer. The same holds for `get_umat(ACCESS_RW)`, `input_array().get_mat()`, `core::swap`, `assign_mat` and `adjust_roi` on a `BoxedRef`/`BoxedRefMut`, and the safe header setters (`set_rows`, `set_cols`, ...) let accessors like `data_typed` read out of bounds.
+  >
+  > ```rust
+  > let mat = {
+  >     let data = vec![0u8; 4];
+  >     Mat::new_rows_cols_with_data(2, 2, &data).unwrap().opencv_into_extern_container().unwrap()
+  > }; // `data` is dropped, `mat` dangles
+  > ```
+  >
+  > Suggestion: don't implement `OpenCVIntoExternContainer` for `BoxedRef`/`BoxedRefMut` (or make it `unsafe`), offer an explicit deep copy instead, and make the header setters `unsafe`.

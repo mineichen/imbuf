@@ -44,3 +44,13 @@ Pending changes for the upcoming releases of the unreleased `imbuf-image` /
 - Add `ImbufAsOpencv` / `ImbufAsOpencvMut` for `imbuf::DynamicImageChannel`.
   Its depth is derived from the primitive size (1 byte: `CV_8U`, 2 bytes:
   `CV_16U`, 4 bytes: `CV_32F`).
+- Check the layout of `cv::Mat` and `cv::UMatData` before reading their mirrored fields, and
+  load the reference counts atomically with acquire ordering. Only `OpenCV` 4 is supported
+  (checked at compile time). If the mirrored fields don't match their accessors, it panics.
+- `OpencvIntoImbuf<'a>` has the lifetime of the resulting image and is implemented for
+  `BoxedRef<'a, Mat>` and `&'a Mat` (the image borrows the buffer, mutable access copies it)
+  and for `BoxedRefMut<'a, Mat>` and `&'a mut Mat` (the image writes into the buffer, clones
+  copy it), besides the owned `Mat`.
+- `as_opencv`/`as_opencv_mut` fail with `StsOutOfRange` for images, whose width or height
+  exceeds `i32::MAX`. Previously, they wrapped to negative `Mat` sizes.
+- `ImbufAsOpencvMut` for typed images requires `Pod` primitives, as `OpenCV` can write any value.

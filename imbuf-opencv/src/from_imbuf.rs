@@ -21,24 +21,27 @@ const F32_SIZE: usize = size_of::<f32>();
 
 /// Borrows an [`imbuf`] buffer as an `OpenCV` [`Mat`] view without copying.
 ///
-/// The `Mat` points at the `imbuf` allocation and is invalidated by the borrow
-/// of the source. No owned conversion is provided in this direction: a `Mat`
-/// cannot take ownership of an `imbuf` allocation without copying, so consumers
-/// who need an owned `Mat` should copy the view explicitly.
+/// The `Mat` points at the `imbuf` buffer and has no reference count. Like the `Mat` of
+/// `Mat::new_rows_cols_with_data`, it's only returned inside a `BoxedRef`, which limits it to
+/// the borrow of the source. Copy the view (e.g. with `Mat::try_clone`) to keep the pixels.
 pub trait ImbufAsOpencv {
     /// # Errors
     /// Fails if the buffer layout cannot be represented as a single `Mat`
-    /// (for example a planar [`DynamicImage`] with more than one channel).
+    /// (for example a planar [`DynamicImage`] with more than one channel), or if its width or
+    /// height exceeds `i32::MAX`.
     fn as_opencv(&self) -> opencv::Result<BoxedRef<'_, Mat>>;
 }
 pub trait ImbufAsOpencvMut: ImbufAsOpencv {
     /// Mutably borrows the buffer as an `OpenCV` [`Mat`] view without copying.
     ///
-    /// Writes through the returned `Mat` land in the `imbuf` buffer.
+    /// Writes through the returned `Mat` land in the `imbuf` buffer, which is made exclusive
+    /// first (copy on write). The view is limited to the borrow like [`ImbufAsOpencv::as_opencv`].
+    /// `OpenCV` can write any value, so typed images require `Pod` primitives.
     ///
     /// # Errors
     /// Fails if the buffer layout cannot be represented as a single `Mat`
-    /// (for example a planar [`DynamicImage`] with more than one channel).
+    /// (for example a planar [`DynamicImage`] with more than one channel), or if its width or
+    /// height exceeds `i32::MAX`.
     fn as_opencv_mut(&mut self) -> opencv::Result<BoxedRefMut<'_, Mat>>;
 }
 
@@ -88,6 +91,7 @@ impl ImbufAsOpencv for DynamicImageChannelView<'_> {
                 .map_err(|e| incompatible_primitive(&e))?;
             let ptr = flat.as_ptr().cast_mut().cast::<c_void>();
             let (dims, pixel_elements) = (channel.dimensions(), channel.pixel_elements());
+            // Safety: The BoxedRef limits the Mat to the borrow of the buffer
             let mat =
                 unsafe { create_unrestricted_mat::<P>(dims, flat.len(), pixel_elements, ptr) }?;
             Ok(BoxedRef::from(mat))
@@ -111,6 +115,7 @@ impl ImbufAsOpencvMut for DynamicImageChannelView<'_> {
                 .make_mut_flat::<P>()
                 .map_err(|e| incompatible_primitive(&e))?;
             let ptr = flat.as_mut_ptr().cast::<c_void>();
+            // Safety: The BoxedRefMut limits the Mat to the mutable borrow of the buffer
             let mat =
                 unsafe { create_unrestricted_mat::<P>(dims, flat.len(), pixel_elements, ptr) }?;
             Ok(BoxedRefMut::from(mat))
@@ -134,24 +139,25 @@ where
         let flat = self.buffer_flat();
         let len = flat.len();
         let ptr = flat.as_ptr().cast_mut().cast::<c_void>();
-        let mat = unsafe {
-            create_unrestricted_mat::<TP::Primitive>(dims, len, self.pixel_elements(), ptr)
-        }?;
+        let els = self.pixel_elements();
+        // Safety: The BoxedRef limits the Mat to the borrow of the buffer
+        let mat = unsafe { create_unrestricted_mat::<TP::Primitive>(dims, len, els, ptr) }?;
         Ok(BoxedRef::from(mat))
     }
 }
 impl<TP: PixelType> ImbufAsOpencvMut for ImageChannelView<'_, TP>
 where
-    TP::Primitive: DataType,
+    TP::Primitive: DataType + Pod,
 {
     fn as_opencv_mut(&mut self) -> opencv::Result<BoxedRefMut<'_, Mat>> {
         let dims = self.dimensions();
         let flat = self.make_mut_flat();
         let len = flat.len();
         let ptr = flat.as_mut_ptr().cast::<c_void>();
-        let mat = unsafe {
-            create_unrestricted_mat::<TP::Primitive>(dims, len, self.pixel_elements(), ptr)
-        }?;
+        let els = self.pixel_elements();
+
+        // Safety: The BoxedRefMut limits the Mat to the mutable borrow of the buffer
+        let mat = unsafe { create_unrestricted_mat::<TP::Primitive>(dims, len, els, ptr) }?;
         Ok(BoxedRefMut::from(mat))
     }
 }
@@ -161,34 +167,36 @@ where
     TP::Primitive: DataType,
 {
     fn as_opencv(&self) -> opencv::Result<BoxedRef<'_, Mat>> {
-        let dims = self.dimensions();
-        let flat = self.buffer_flat();
-        let ptr = flat.as_ptr().cast_mut().cast::<c_void>();
-        let mat = unsafe {
-            create_unrestricted_mat::<TP::Primitive>(dims, flat.len(), TP::ELEMENTS, ptr)
-        }?;
-        Ok(BoxedRef::from(mat))
+        self.first().as_opencv()
     }
 }
 impl<TP: PixelType> ImbufAsOpencvMut for ImageView<'_, TP, 1>
 where
-    TP::Primitive: DataType,
+    TP::Primitive: DataType + Pod,
 {
     fn as_opencv_mut(&mut self) -> opencv::Result<BoxedRefMut<'_, Mat>> {
-        let dims = self.dimensions();
-        let flat = self.make_mut_flat();
-        let ptr = flat.as_mut_ptr().cast::<c_void>();
-        let mat = unsafe {
-            create_unrestricted_mat::<TP::Primitive>(dims, flat.len(), TP::ELEMENTS, ptr)
-        }?;
-        Ok(BoxedRefMut::from(mat))
+        self.first_mut().as_opencv_mut()
+    }
+}
+
+/// The rows and columns of a `Mat` with the dimensions of an image. `OpenCV` uses `int` sizes, so
+/// larger dimensions are rejected (they would wrap to negative sizes).
+fn mat_size((width, height): (NonZeroU32, NonZeroU32)) -> opencv::Result<(i32, i32)> {
+    match (i32::try_from(height.get()), i32::try_from(width.get())) {
+        (Ok(rows), Ok(cols)) => Ok((rows, cols)),
+        _ => Err(opencv::Error::new(
+            Code::StsOutOfRange.into(),
+            format!("A Mat can't have {width}x{height} pixels, as its dimensions are `int`s"),
+        )),
     }
 }
 
 /// Rejects a buffer whose length is not exactly `height * width * elements`.
 ///
 /// # Safety
-/// Assumes that the returned `Mat`'s lifetime is restricted.
+/// `ptr` has to point to `len` values of `P`. The returned `Mat` has no reference count, so it
+/// may only be returned inside a `BoxedRef`, which is limited to the borrow of the buffer, or a
+/// `BoxedRefMut` for an exclusive borrow, if it's written.
 unsafe fn create_unrestricted_mat<P: DataType>(
     (width, height): (NonZeroU32, NonZeroU32),
     len: usize,
@@ -203,7 +211,7 @@ unsafe fn create_unrestricted_mat<P: DataType>(
         "the buffer holds {len} values, but {expected} are needed"
     );
 
-    let (rows, cols) = (height.get().cast_signed(), width.get().cast_signed());
+    let (rows, cols) = mat_size((width, height))?;
     unsafe {
         Mat::new_rows_cols_with_data_unsafe_def(
             rows,
@@ -465,6 +473,25 @@ mod tests {
             channel.as_opencv_mut(),
             Err(e) if e.code_as_enum() == Some(Code::StsUnsupportedFormat)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn dimensions_beyond_int_are_rejected() -> TestResult {
+        let max = NonZeroU32::new(i32::MAX.unsigned_abs()).ok_or("zero")?;
+        let too_large = max.checked_add(1).ok_or("overflow")?;
+        assert_eq!(mat_size((max, NZ_1))?, (1, i32::MAX));
+        assert_eq!(mat_size((NZ_1, max))?, (i32::MAX, 1));
+        for dimensions in [
+            (too_large, NZ_1),
+            (NZ_1, too_large),
+            (NonZeroU32::MAX, NonZeroU32::MAX),
+        ] {
+            assert_matches!(
+                mat_size(dimensions),
+                Err(e) if e.code_as_enum() == Some(Code::StsOutOfRange)
+            );
+        }
         Ok(())
     }
 }

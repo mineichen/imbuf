@@ -144,7 +144,64 @@ fn misaligned_buffer_is_rejected() {
     assert_matches!(ImageChannel::<f32>::try_from(channel), Err(_));
 }
 
-#[test]
+/// A single `Rgba8` pixel, which `clone` and `make_mut` return instead of the channel. This
+/// breaks the contract of the vtable, as it changes the dimensions.
+fn single_pixel() -> DynamicImageChannel {
+    DynamicImageChannel::new_vec(vec![Rgba8([0; 4])], NZ_1, NZ_1).unwrap()
+}
+unsafe extern "C-unwind" fn shrinking_clone<'a>(
+    _: &DynamicImageChannelView<'a>,
+) -> DynamicImageChannelView<'a> {
+    single_pixel()
+}
+unsafe extern "C-unwind" fn shrinking_make_mut(image: &mut DynamicImageChannelView<'_>) {
+    *image = single_pixel();
+}
+
+/// Vtable for `Rgba8` primitives, which changes the dimensions
+static SHRINKING_VTABLE: ImageChannelVTable = ImageChannelVTable {
+    clone: shrinking_clone,
+    make_mut: shrinking_make_mut,
+    drop: noop_drop,
+    primitive_size: four_bytes,
+    primitive_alignment: one_byte,
+};
+
+/// Two `Rgba8` pixels with a vtable, which changes the dimensions
+fn shrinking_channel() -> ImageChannel<Rgba8> {
+    // Safety: The static buffer contains two pixels. It's never written, as make_mut replaces
+    // the channel
+    unsafe {
+        ImageChannel::new_with_vtable(
+            BYTES.0.as_ptr().cast(),
+            NZ_2,
+            NZ_1,
+            &SHRINKING_VTABLE,
+            std::ptr::null_mut(),
+        )
+    }
+}
+
+#[cfg_attr(debug_assertions, test)]
+fn vtable_must_keep_the_dimensions() {
+    let mut channel = shrinking_channel();
+    assert_matches!(catch_unwind(AssertUnwindSafe(|| channel.clone())), Err(_));
+    // The slice of two pixels would be out of bounds of the single pixel
+    assert_matches!(
+        catch_unwind(AssertUnwindSafe(|| channel.make_mut().len())),
+        Err(_)
+    );
+
+    let mut dynamic = DynamicImageChannel::from(shrinking_channel());
+    assert_matches!(
+        catch_unwind(AssertUnwindSafe(|| dynamic
+            .make_mut_flat::<Rgba8>()
+            .map(|pixels| pixels.len()))),
+        Err(_)
+    );
+}
+
+#[cfg_attr(debug_assertions, test)]
 fn panics_in_vtable_propagate() {
     let mut channel = misaligned_channel();
     assert_matches!(catch_unwind(AssertUnwindSafe(|| channel.clone())), Err(_));

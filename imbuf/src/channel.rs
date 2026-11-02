@@ -152,9 +152,19 @@ impl<'a, TP: PixelType> ImageChannelView<'a, TP> {
     ///
     /// # Safety
     /// The fields must fulfill the invariants of [`DynamicImageChannelView::from_raw_parts`]
-    /// (e.g. the buffer is valid for `'a`), except that the buffer only has to be valid for
-    /// `TP::Primitive` instead of any `Pod` type. Furthermore, `ptr` must be aligned for
-    /// `TP::Primitive` and `vtable.primitive_size()` must return `size_of::<TP::Primitive>()`.
+    /// (e.g. the buffer is valid for `'a`), except that the buffer only has to contain valid
+    /// values of `TP::Primitive` instead of being valid for any `Pod` type. The vtable has to
+    /// accept every value, which safe code can write through the channel: Any value of
+    /// `TP::Primitive`, and any bytes, if `TP::Primitive` is `Pod` (the channel can be converted
+    /// into a [`DynamicImageChannelView`]).
+    ///
+    /// Furthermore, `vtable.primitive_size` must return `size_of::<TP::Primitive>()` and
+    /// `vtable.primitive_alignment` at least `align_of::<TP::Primitive>()`, so `ptr` and all future
+    /// buffers of the channel are aligned for `TP::Primitive`.
+    ///
+    /// # Panics
+    /// In debug builds, panics if the vtable doesn't fit `TP` or the checks of
+    /// [`DynamicImageChannelView::from_raw_parts`] fail.
     pub unsafe fn new_with_vtable(
         ptr: *const TP::Primitive,
         width: NonZeroU32,
@@ -172,6 +182,11 @@ impl<'a, TP: PixelType> ImageChannelView<'a, TP> {
                 data,
             )
         };
+        debug_assert_eq!(
+            Ok(()),
+            channel.ensure_fits_pixel::<TP>(),
+            "The vtable doesn't fit the pixel type"
+        );
         // Safety: Forwarded to the caller
         unsafe { Self::from_dynamic_unchecked(channel) }
     }
@@ -223,8 +238,9 @@ impl<'a, TP: PixelType> ImageChannelView<'a, TP> {
     }
 
     pub fn make_mut(&mut self) -> &mut [TP] {
-        let len = self.len();
         let flat = self.make_mut_flat();
+        // `make_mut` keeps `pixel_elements` (checked), so the flat buffer contains whole pixels
+        let len = flat.len() / usize::from(TP::ELEMENTS.get());
         // Safety: The flat buffer contains `len` pixels with `TP::ELEMENTS` primitives each
         unsafe { slice::from_raw_parts_mut(flat.as_mut_ptr().cast::<TP>(), len) }
     }
@@ -301,6 +317,8 @@ impl<'a, TP: PixelType> ImageChannelView<'a, TP> {
     }
 
     /// The untyped channel, e.g. to inspect its storage
+    /// This must remain private. Allowing `dynamic` of `Image<NonZeroU8, 1>` allows `.try_cast::<u8>().make_mut()`
+    /// DTor still assumes NonZeroU8
     pub(crate) const fn as_dynamic(&self) -> &DynamicImageChannelView<'a> {
         &self.0
     }
@@ -442,13 +460,16 @@ impl<TP: PixelType> Debug for ImageChannelView<'_, TP> {
 #[repr(C)]
 pub struct ImageChannelVTable {
     /// Returns a channel with the same dimensions, `pixel_elements` and content, which can be used
-    /// independently. The buffer can be shared until `make_mut` is called.
+    /// independently. The buffer can be shared until `make_mut` is called. It has to keep
+    /// `primitive_size` and `primitive_alignment` (see there). Changed dimensions or
+    /// `pixel_elements` panic.
     pub clone: for<'a> unsafe extern "C-unwind" fn(
         &DynamicImageChannelView<'a>,
     ) -> DynamicImageChannelView<'a>,
     /// Ensures that the buffer is exclusively owned by the channel, so it can be mutated.
-    /// The entire channel can be replaced (assigning a `DynamicImageChannelView` drops the old one).
-    /// Like `clone`, it has to preserve `primitive_size` and `primitive_alignment` (see there).
+    /// The entire channel can be replaced (assigning a `DynamicImageChannelView` drops the old one),
+    /// but like `clone`, it has to keep the dimensions, `pixel_elements`, content, `primitive_size`
+    /// and `primitive_alignment`. Changed dimensions or `pixel_elements` panic.
     pub make_mut: unsafe extern "C-unwind" fn(&mut DynamicImageChannelView<'_>),
     /// Releases the buffer and `data`. The channel is not used afterwards.
     pub drop: unsafe extern "C-unwind" fn(&mut DynamicImageChannelView<'_>),
