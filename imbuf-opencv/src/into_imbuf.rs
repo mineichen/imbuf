@@ -118,6 +118,7 @@ impl<P: PixelTypePrimitive + Pod> MatChannelFactory<P> for OwnedMatFactory {
     const VTABLE: &'static ImageChannelVTable = &ImageChannelVTable::new::<P>(
         share_mat_channel::<P>,
         make_owned_mat_channel_mut::<P>,
+        try_make_owned_mat_channel_mut,
         drop_mat_channel,
     );
 }
@@ -126,6 +127,7 @@ impl<P: PixelTypePrimitive + Pod> MatChannelFactory<P> for BorrowedMatFactory {
     const VTABLE: &'static ImageChannelVTable = &ImageChannelVTable::new::<P>(
         share_mat_channel::<P>,
         make_borrowed_mat_channel_mut::<P>,
+        borrowed_mat_is_never_written,
         drop_mat_channel,
     );
 }
@@ -134,6 +136,7 @@ impl<P: PixelTypePrimitive + Pod> MatChannelFactory<P> for BorrowedMutMatFactory
     const VTABLE: &'static ImageChannelVTable = &ImageChannelVTable::new::<P>(
         copy_mat_channel::<P>,
         write_through_mat_channel,
+        mut_borrowed_mat_is_exclusive,
         drop_mat_channel,
     );
 }
@@ -444,13 +447,21 @@ unsafe extern "C-unwind" fn copy_mat_channel<'a, P: PixelTypePrimitive + Pod>(
 unsafe extern "C-unwind" fn make_owned_mat_channel_mut<P: PixelTypePrimitive + Pod>(
     image: &mut DynamicImageChannelView<'_>,
 ) {
-    let mat = unsafe { mat_view(image) };
-    if mat_buffer_is_exclusive(&mat) {
+    if unsafe { try_make_owned_mat_channel_mut(image) } {
         // The pointer already points into this Mat's buffer; keep it.
         return;
     }
     // Assigning drops the previous channel, which releases its Mat
     *image = unsafe { copy_mat_channel::<P>(image) };
+}
+
+/// The buffer of the owned `Mat` is exclusive, if no other `Mat` shares it. Only this channel
+/// could create a new share, which it can't while it's borrowed mutably.
+unsafe extern "C-unwind" fn try_make_owned_mat_channel_mut(
+    image: &mut DynamicImageChannelView<'_>,
+) -> bool {
+    let mat = unsafe { mat_view(image) };
+    mat_buffer_is_exclusive(&mat)
 }
 
 /// A shared borrow is never written, so mutable access copies the buffer
@@ -461,8 +472,22 @@ unsafe extern "C-unwind" fn make_borrowed_mat_channel_mut<P: PixelTypePrimitive 
     *image = unsafe { copy_mat_channel::<P>(image) };
 }
 
+/// `try_make_mut` of a shared borrow, which is never written
+unsafe extern "C-unwind" fn borrowed_mat_is_never_written(
+    _: &mut DynamicImageChannelView<'_>,
+) -> bool {
+    false
+}
+
 /// The buffer is exclusively borrowed for the lifetime of the channel, so it's written directly
 unsafe extern "C-unwind" fn write_through_mat_channel(_: &mut DynamicImageChannelView<'_>) {}
+
+/// `try_make_mut` of an exclusive borrow, which is written directly
+unsafe extern "C-unwind" fn mut_borrowed_mat_is_exclusive(
+    _: &mut DynamicImageChannelView<'_>,
+) -> bool {
+    true
+}
 
 unsafe extern "C-unwind" fn drop_mat_channel(image: &mut DynamicImageChannelView<'_>) {
     drop(ManuallyDrop::into_inner(unsafe { mat_view(image) }));
@@ -734,6 +759,40 @@ mod tests {
             assert_eq!(image[0].buffer_flat::<u8>()?.as_ptr(), ptr);
             assert_eq!(clone[0].buffer_flat::<u8>()?, &[1, 2, 3, 4]);
             assert_ne!(clone[0].buffer_flat::<u8>()?.as_ptr(), ptr);
+        }
+        assert_eq!(backing, [42, 2, 3, 4]);
+        Ok(())
+    }
+
+    #[test]
+    fn buffer_mut_only_returns_buffers_which_are_written_without_copy() -> TestResult {
+        // An owned Mat is exclusive, until another Mat shares its buffer
+        let mut image = Mat::from_slice_2d(&[[1u8, 2], [3, 4]])?.into_imbuf_dynamic()?;
+        let ptr = DynamicImageChannelView::raw_ptr(&image[0]);
+        image[0]
+            .buffer_flat_mut::<u8>()?
+            .ok_or("The Mat is exclusive")?[0] = 42;
+        let clone = image.clone();
+        assert_eq!(image[0].buffer_flat_mut::<u8>()?, None);
+        assert_eq!(clone[0].buffer_flat::<u8>()?.as_ptr(), ptr);
+        drop(clone);
+        let buffer = image[0].buffer_flat_mut::<u8>()?;
+        assert_eq!(buffer.map(|buffer| buffer.as_ptr()), Some(ptr));
+        assert_eq!(image[0].buffer_flat::<u8>()?, &[42, 2, 3, 4]);
+
+        // A shared borrow is never written
+        let backing = [1u8, 2, 3, 4];
+        let mut borrowed = Mat::new_rows_cols_with_data(2, 2, &backing)?.into_imbuf_dynamic()?;
+        assert_eq!(borrowed[0].buffer_flat_mut::<u8>()?, None);
+
+        // An exclusive borrow is written directly
+        let mut backing = [1u8, 2, 3, 4];
+        {
+            let mut borrowed =
+                Mat::new_rows_cols_with_data_mut(2, 2, &mut backing)?.into_imbuf_dynamic()?;
+            borrowed[0]
+                .buffer_flat_mut::<u8>()?
+                .ok_or("The borrow is exclusive")?[0] = 42;
         }
         assert_eq!(backing, [42, 2, 3, 4]);
         Ok(())

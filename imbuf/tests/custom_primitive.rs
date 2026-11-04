@@ -105,11 +105,14 @@ unsafe extern "C-unwind" fn panicking_clone<'a>(
 unsafe extern "C-unwind" fn panicking_make_mut(_: &mut DynamicImageChannelView<'_>) {
     panic!("The static buffer is read only")
 }
+unsafe extern "C-unwind" fn read_only(_: &mut DynamicImageChannelView<'_>) -> bool {
+    false
+}
 unsafe extern "C-unwind" fn noop_drop(_: &mut DynamicImageChannelView<'_>) {}
 
 /// Vtable for `Rgba8` primitives. It's a `const fn`, so the vtable can be created in a `static`
 static STATIC_VTABLE: ImageChannelVTable =
-    ImageChannelVTable::new::<Rgba8>(panicking_clone, panicking_make_mut, noop_drop);
+    ImageChannelVTable::new::<Rgba8>(panicking_clone, panicking_make_mut, read_only, noop_drop);
 
 /// One `Rgba8` pixel, which starts at an address which is not aligned for `f32`
 fn misaligned_channel() -> DynamicImageChannel {
@@ -162,10 +165,20 @@ unsafe extern "C-unwind" fn shrinking_clone<'a>(
 unsafe extern "C-unwind" fn shrinking_make_mut(image: &mut DynamicImageChannelView<'_>) {
     *image = single_pixel();
 }
+unsafe extern "C-unwind" fn shrinking_try_make_mut(
+    image: &mut DynamicImageChannelView<'_>,
+) -> bool {
+    *image = single_pixel();
+    true
+}
 
 /// Vtable for `Rgba8` primitives, which changes the dimensions
-static SHRINKING_VTABLE: ImageChannelVTable =
-    ImageChannelVTable::new::<Rgba8>(shrinking_clone, shrinking_make_mut, noop_drop);
+static SHRINKING_VTABLE: ImageChannelVTable = ImageChannelVTable::new::<Rgba8>(
+    shrinking_clone,
+    shrinking_make_mut,
+    shrinking_try_make_mut,
+    noop_drop,
+);
 
 /// Two `Rgba8` pixels with a vtable, which changes the dimensions
 fn shrinking_channel() -> ImageChannel<Rgba8> {
@@ -199,6 +212,30 @@ fn vtable_must_keep_the_dimensions() {
             .map(|pixels| pixels.len()))),
         Err(_)
     );
+
+    // `make_mut` replaced the channels above, so they don't shrink anymore
+    let mut channel = shrinking_channel();
+    assert_matches!(
+        catch_unwind(AssertUnwindSafe(|| channel
+            .buffer_mut()
+            .map(|pixels| pixels.len()))),
+        Err(_)
+    );
+    let mut dynamic = DynamicImageChannel::from(shrinking_channel());
+    assert_matches!(
+        catch_unwind(AssertUnwindSafe(|| dynamic
+            .buffer_flat_mut::<Rgba8>()
+            .map(|pixels| pixels.map(|pixels| pixels.len())))),
+        Err(_)
+    );
+}
+
+#[test]
+fn read_only_vtable_never_claims_the_buffer() {
+    let mut channel = misaligned_channel();
+    // `make_mut` of the vtable panics, so `buffer_mut` doesn't call it
+    assert_matches!(channel.buffer_mut::<Rgba8>(), Ok(None));
+    assert_matches!(channel.buffer_flat_mut::<Rgba8>(), Ok(None));
 }
 
 #[cfg_attr(debug_assertions, test)]

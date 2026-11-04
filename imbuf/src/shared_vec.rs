@@ -90,12 +90,21 @@ unsafe extern "C-unwind" fn clone_shared_vec<'a, T: 'static, const CHANNELS: usi
     }
 }
 
+/// The slice of the channel is exclusive, if no clone shares it. The other channels own other
+/// slices of the `Vec`.
+unsafe extern "C-unwind" fn try_make_mut_shared_vec<T: 'static, const CHANNELS: usize>(
+    channel: &mut DynamicImageChannelView<'_>,
+) -> bool {
+    let metadata = unsafe { metadata::<T, CHANNELS>(channel) };
+    // Acquire synchronizes with the release of dropped clones (like `Arc::get_mut`). Only this
+    // channel could create a new share, which it can't while it's borrowed mutably.
+    unsafe { (*metadata.data_ptr).slice_refs[metadata.slice_idx].load(Ordering::Acquire) == 1 }
+}
+
 unsafe extern "C-unwind" fn make_mut_shared_vec<T: PixelTypePrimitive, const CHANNELS: usize>(
     channel: &mut DynamicImageChannelView<'_>,
 ) {
-    let metadata = unsafe { metadata::<T, CHANNELS>(channel) };
-    let is_unique =
-        unsafe { (*metadata.data_ptr).slice_refs[metadata.slice_idx].load(Ordering::Acquire) == 1 };
+    let is_unique = unsafe { try_make_mut_shared_vec::<T, CHANNELS>(channel) };
 
     if !is_unique {
         // Safety: The vtable is built for T
@@ -138,6 +147,7 @@ impl<T: PixelTypePrimitive, const CHANNELS: usize> ChannelFactory<T>
     const VTABLE: &'static ImageChannelVTable = &ImageChannelVTable::new::<T>(
         clone_shared_vec::<T, CHANNELS>,
         make_mut_shared_vec::<T, CHANNELS>,
+        try_make_mut_shared_vec::<T, CHANNELS>,
         drop_shared_vec::<T, CHANNELS>,
     );
 }

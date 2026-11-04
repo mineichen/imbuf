@@ -181,12 +181,18 @@ impl<T: PixelTypePrimitive> ChannelFactory<T> for VecFactory {
     const VTABLE: &'static ImageChannelVTable = &ImageChannelVTable::new::<T>(
         crate::arc::clone_slice_into_arc_channel::<T>,
         make_mut,
+        try_make_mut,
         drop_vec_channel::<T>,
     );
 }
 
 unsafe extern "C-unwind" fn make_mut(_image: &mut DynamicImageChannelView<'_>) {
     // Do nothing, as the Vec is never shared (clone copies it)
+}
+
+unsafe extern "C-unwind" fn try_make_mut(_image: &mut DynamicImageChannelView<'_>) -> bool {
+    // The Vec is never shared (clone copies it)
+    true
 }
 
 pub(crate) unsafe extern "C-unwind" fn drop_vec_channel<T>(

@@ -120,6 +120,15 @@ impl<T: PixelTypePrimitive> ChannelFactory<T> for ArcFactory {
                 };
             }
         }
+        unsafe extern "C-unwind" fn try_make_mut<T>(
+            image: &mut DynamicImageChannelView<'_>,
+        ) -> bool {
+            let mut arc = unsafe { arc_view::<T>(image) };
+            // Only this channel could create a new share, which it can't while it's borrowed
+            // mutably
+            Arc::get_mut(&mut arc).is_some()
+        }
+
         unsafe extern "C-unwind" fn clear_arc_channel<T>(image: &mut DynamicImageChannelView<'_>) {
             drop(ManuallyDrop::into_inner(unsafe { arc_view::<T>(image) }));
         }
@@ -140,6 +149,7 @@ impl<T: PixelTypePrimitive> ChannelFactory<T> for ArcFactory {
         &ImageChannelVTable::new::<T>(
             clone_arc_channel::<T>,
             make_mut::<T>,
+            try_make_mut::<T>,
             clear_arc_channel::<T>,
         )
     };

@@ -165,6 +165,30 @@ impl<'a> DynamicImageView<'a> {
         self.try_into()
     }
 
+    /// Mutable access to the buffer of a single channel image without copying it, see
+    /// [`DynamicImageChannelView::buffer_mut`]. For images with multiple channels, use
+    /// [`DynamicImageView::try_cast_mut`] and [`ImageView::buffers_mut`].
+    ///
+    /// Fails, if the image has more than one channel or the layout of `T` doesn't match
+    pub fn buffer_mut<T: PixelType + Pod>(
+        &mut self,
+    ) -> Result<Option<&mut [T]>, IncompatibleImageError> {
+        self.ensure_single_channel()?;
+        Ok(self.channels[0].buffer_mut()?)
+    }
+
+    /// Flat version of [`DynamicImageView::buffer_mut`], see
+    /// [`DynamicImageChannelView::buffer_flat_mut`]
+    ///
+    /// Fails, if the image has more than one channel or the size or the alignment of `T` don't
+    /// match
+    pub fn buffer_flat_mut<T: PixelTypePrimitive + Pod>(
+        &mut self,
+    ) -> Result<Option<&mut [T]>, IncompatibleImageError> {
+        self.ensure_single_channel()?;
+        Ok(self.channels[0].buffer_flat_mut()?)
+    }
+
     /// Checks, that the channel count, the pixel layouts and the dimensions match
     fn ensure_compatible<T: PixelType, const CHANNELS: usize>(
         &self,
@@ -499,8 +523,61 @@ impl<'a> DynamicImageChannelView<'a> {
         self.make_exclusive();
         // make_mut might reallocate, but keeps the primitive (contract of the vtable). Size and
         // alignment are checked again in debug builds.
+        // Safety: The buffer is exclusive. The primitive is forwarded to the caller
+        unsafe { self.buffer_flat_mut_unchecked() }
+    }
+
+    /// Mutable access to the buffer without copying it. `None`, if writing requires a copy,
+    /// because the buffer is shared (e.g. with a clone) or borrowed immutably, or the storage
+    /// can't tell (see `try_make_mut` of [`ImageChannelVTable::new`]).
+    /// [`DynamicImageChannelView::make_mut_flat`] copies in that case.
+    ///
+    /// Fails, if `pixel_elements`, the size or the alignment of `T::Primitive` don't match
+    pub fn buffer_mut<T: PixelType + Pod>(
+        &mut self,
+    ) -> Result<Option<&mut [T]>, IncompatibleChannelError> {
+        self.ensure_fits_pixel::<T>()?;
+        Ok(if self.try_make_exclusive() {
+            // Safety: The buffer is exclusive and the layout is checked. Pod accepts any bit
+            // pattern
+            Some(unsafe { self.buffer_mut_unchecked() })
+        } else {
+            None
+        })
+    }
+
+    /// Flat version of [`DynamicImageChannelView::buffer_mut`]
+    ///
+    /// Fails, if the size or the alignment of `T` don't match the primitive of the channel
+    pub fn buffer_flat_mut<T: PixelTypePrimitive + Pod>(
+        &mut self,
+    ) -> Result<Option<&mut [T]>, IncompatibleChannelError> {
+        self.ensure_fits_primitive::<T>()?;
+        Ok(if self.try_make_exclusive() {
+            // Safety: The buffer is exclusive, size and alignment are checked. Pod accepts any
+            // bit pattern
+            Some(unsafe { self.buffer_flat_mut_unchecked() })
+        } else {
+            None
+        })
+    }
+
+    /// # Safety
+    /// The buffer has to be exclusive (see [`DynamicImageChannelView::make_exclusive`] and
+    /// [`DynamicImageChannelView::try_make_exclusive`]) and `T` has to fit like for
+    /// [`DynamicImageChannelView::buffer_unchecked`]
+    pub(crate) unsafe fn buffer_mut_unchecked<T: PixelType>(&mut self) -> &mut [T] {
+        debug_assert_eq!(Ok(()), self.ensure_fits_pixel::<T>());
+        // Safety: Forwarded to the caller. The length is valid due to the invariants of the channel
+        unsafe { slice::from_raw_parts_mut(self.ptr.cast::<T>().cast_mut(), self.len()) }
+    }
+
+    /// # Safety
+    /// The buffer has to be exclusive (see [`DynamicImageChannelView::buffer_mut_unchecked`]) and
+    /// `T` has to fit like for [`DynamicImageChannelView::buffer_flat_unchecked`]
+    pub(crate) unsafe fn buffer_flat_mut_unchecked<T: PixelTypePrimitive>(&mut self) -> &mut [T] {
         debug_assert_eq!(Ok(()), self.ensure_fits_primitive::<T>());
-        // Safety: Forwarded to the caller
+        // Safety: Forwarded to the caller. The length is valid due to the invariants of the channel
         unsafe { slice::from_raw_parts_mut(self.ptr.cast::<T>().cast_mut(), self.len_flat()) }
     }
 
@@ -512,6 +589,18 @@ impl<'a> DynamicImageChannelView<'a> {
         unsafe { (self.vtable.make_mut)(self) };
         #[cfg(debug_assertions)]
         self.assert_derived_layout(before, "make_mut");
+    }
+
+    /// Calls `vtable.try_make_mut`: Whether the buffer is exclusively owned by the channel
+    /// afterwards, without copying it
+    pub(crate) fn try_make_exclusive(&mut self) -> bool {
+        #[cfg(debug_assertions)]
+        let before = (self.pixel_layout(), self.dimensions());
+        // Safety: The vtable is able to work with the channel
+        let exclusive = unsafe { (self.vtable.try_make_mut)(self) };
+        #[cfg(debug_assertions)]
+        self.assert_derived_layout(before, "try_make_mut");
+        exclusive
     }
 
     #[must_use]

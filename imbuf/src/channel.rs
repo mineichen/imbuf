@@ -238,6 +238,44 @@ impl<'a, TP: PixelType> ImageChannelView<'a, TP> {
         self.0.len()
     }
 
+    /// Mutable access to the buffer without copying it. `None`, if writing requires a copy,
+    /// because the buffer is shared (e.g. with a clone) or borrowed immutably (e.g.
+    /// [`ImageChannelView::new_slice`]), or the storage can't tell (see `try_make_mut` of
+    /// [`ImageChannelVTable::new`]). [`ImageChannelView::make_mut`] copies in that case.
+    pub fn buffer_mut(&mut self) -> Option<&mut [TP]> {
+        if self.try_make_exclusive() {
+            // Safety: The buffer is exclusive
+            Some(unsafe { self.buffer_mut_unchecked() })
+        } else {
+            None
+        }
+    }
+
+    /// Flat version of [`ImageChannelView::buffer_mut`]
+    pub fn buffer_flat_mut(&mut self) -> Option<&mut [TP::Primitive]> {
+        if self.try_make_exclusive() {
+            // Safety: The buffer is exclusive. The primitive was checked during construction and
+            // is kept by the vtable
+            Some(unsafe { self.0.buffer_flat_mut_unchecked() })
+        } else {
+            None
+        }
+    }
+
+    /// Calls `try_make_mut` of the vtable: Whether the buffer is exclusive afterwards
+    pub(crate) fn try_make_exclusive(&mut self) -> bool {
+        self.0.try_make_exclusive()
+    }
+
+    /// # Safety
+    /// The buffer has to be exclusive, e.g. after [`ImageChannelView::try_make_exclusive`]
+    /// returned `true`
+    pub(crate) unsafe fn buffer_mut_unchecked(&mut self) -> &mut [TP] {
+        // Safety: The layout was checked during construction and is kept by the vtable. The
+        // exclusivity is forwarded to the caller
+        unsafe { self.0.buffer_mut_unchecked() }
+    }
+
     pub fn make_mut(&mut self) -> &mut [TP] {
         let flat = self.make_mut_flat();
         // `make_mut` keeps `pixel_elements` (contract of the vtable, checked in debug builds), so
@@ -477,7 +515,14 @@ impl<TP: PixelType> Debug for ImageChannelView<'_, TP> {
 /// }
 ///
 /// fn box_vtable<T: PixelTypePrimitive>() -> &'static ImageChannelVTable {
-///     const { &ImageChannelVTable::new::<T>(clone_box::<T>, make_box_mut, drop_box::<T>) }
+///     const {
+///         &ImageChannelVTable::new::<T>(
+///             clone_box::<T>,
+///             make_box_mut,
+///             try_make_box_mut,
+///             drop_box::<T>,
+///         )
+///     }
 /// }
 ///
 /// unsafe extern "C-unwind" fn clone_box<'a, T: PixelTypePrimitive>(
@@ -502,6 +547,11 @@ impl<TP: PixelType> Debug for ImageChannelView<'_, TP> {
 ///     // The Box is never shared, as `clone` copies it
 /// }
 ///
+/// unsafe extern "C-unwind" fn try_make_box_mut(_: &mut DynamicImageChannelView<'_>) -> bool {
+///     // Exclusive without copying, so `buffer_mut` returns the buffer
+///     true
+/// }
+///
 /// unsafe extern "C-unwind" fn drop_box<T>(channel: &mut DynamicImageChannelView<'_>) {
 ///     let buffer = ptr::slice_from_raw_parts_mut(
 ///         DynamicImageChannelView::raw_ptr(channel).cast::<T>().cast_mut(),
@@ -516,6 +566,9 @@ impl<TP: PixelType> Debug for ImageChannelView<'_, TP> {
 /// clone.make_mut()[0] = 3;
 /// assert_eq!(channel.buffer(), &[1, 2]);
 /// assert_eq!(clone.buffer(), &[3, 2]);
+/// // Writes without copying
+/// clone.buffer_mut().unwrap()[1] = 4;
+/// assert_eq!(clone.buffer(), &[3, 4]);
 /// ```
 ///
 /// All functions use the "C-unwind" ABI, so panics propagate instead of aborting. They receive a
@@ -544,6 +597,8 @@ pub struct ImageChannelVTable {
         &DynamicImageChannelView<'a>,
     ) -> DynamicImageChannelView<'a>,
     pub(crate) make_mut: unsafe extern "C-unwind" fn(&mut DynamicImageChannelView<'_>),
+    /// `make_mut` without copying, see [`ImageChannelVTable::new`]
+    pub(crate) try_make_mut: unsafe extern "C-unwind" fn(&mut DynamicImageChannelView<'_>) -> bool,
     pub(crate) drop: unsafe extern "C-unwind" fn(&mut DynamicImageChannelView<'_>),
     /// Size of the primitive of the channel in bytes. It's the same for the entire lifetime of the
     /// channel and for channels created by `clone` and `make_mut`. It receives the channel, so
@@ -583,18 +638,27 @@ impl ImageChannelVTable {
     ///   mutated. The entire channel can be replaced (assigning a `DynamicImageChannelView` drops
     ///   the old one), but it has to keep the dimensions, `pixel_elements` and content, and the
     ///   primitive like `clone`.
+    /// - `try_make_mut` is `make_mut` without copying the buffer, which enables
+    ///   [`ImageChannelView::buffer_mut`], [`DynamicImageChannelView::buffer_mut`] and their
+    ///   `flat` versions. It returns `true`, if the buffer is exclusively owned by the channel
+    ///   afterwards, so it can be mutated like after `make_mut` (e.g. because a reference count
+    ///   is 1). Otherwise, it returns `false`, e.g. if the buffer is shared or borrowed
+    ///   immutably. Returning `false` is always sound, but then `buffer_mut` returns `None`.
+    ///   Like `make_mut`, it can replace the channel, but has to keep the dimensions,
+    ///   `pixel_elements`, content and primitive.
     /// - `drop` releases the buffer and `data`. The channel is not used afterwards.
     /// - `clone` can be called concurrently, as channels are `Sync`.
     ///
     /// Typed views rely on this contract, so violating it is undefined behavior. Debug builds
-    /// check the dimensions, `pixel_elements` and the primitive after `clone` and `make_mut` and
-    /// panic, if they changed.
+    /// check the dimensions, `pixel_elements` and the primitive after `clone`, `make_mut` and
+    /// `try_make_mut` and panic, if they changed.
     #[must_use]
     pub const fn new<T: PixelTypePrimitive>(
         clone: for<'a> unsafe extern "C-unwind" fn(
             &DynamicImageChannelView<'a>,
         ) -> DynamicImageChannelView<'a>,
         make_mut: unsafe extern "C-unwind" fn(&mut DynamicImageChannelView<'_>),
+        try_make_mut: unsafe extern "C-unwind" fn(&mut DynamicImageChannelView<'_>) -> bool,
         drop: unsafe extern "C-unwind" fn(&mut DynamicImageChannelView<'_>),
     ) -> Self {
         // Checks the type hint at compile time, so `DynamicImageChannelView::type_hint` can't fail
@@ -608,6 +672,7 @@ impl ImageChannelVTable {
             abi_version: Self::ABI_VERSION,
             clone,
             make_mut,
+            try_make_mut,
             drop,
             primitive_size: primitive_size::<T>,
             primitive_alignment: primitive_alignment::<T>,

@@ -7,7 +7,7 @@ use crate::{
     channel::{ChannelFactory, ImageChannelVTable},
 };
 
-/// Shared borrow of a buffer. `make_mut` copies the buffer into a Vec.
+/// Shared borrow of a buffer. `make_mut` copies the buffer into an `Arc`.
 struct SliceFactory;
 
 /// Exclusive borrow of a buffer. `clone` copies the buffer.
@@ -63,8 +63,17 @@ pub(crate) unsafe fn slice_mut_channel<'a, T: PixelTypePrimitive>(
 }
 
 impl<T: PixelTypePrimitive> ChannelFactory<T> for SliceFactory {
-    const VTABLE: &'static ImageChannelVTable =
-        &ImageChannelVTable::new::<T>(clone_slice_channel, copy_into_arc::<T>, noop_drop);
+    const VTABLE: &'static ImageChannelVTable = &ImageChannelVTable::new::<T>(
+        clone_slice_channel,
+        copy_into_arc::<T>,
+        borrowed_immutably,
+        noop_drop,
+    );
+}
+
+/// `try_make_mut` of [`SliceFactory`]: The buffer is never written, as it's borrowed immutably
+unsafe extern "C-unwind" fn borrowed_immutably(_: &mut DynamicImageChannelView<'_>) -> bool {
+    false
 }
 
 impl<T: PixelTypePrimitive> ChannelFactory<T> for SliceMutFactory {
@@ -72,35 +81,69 @@ impl<T: PixelTypePrimitive> ChannelFactory<T> for SliceMutFactory {
         unsafe extern "C-unwind" fn make_original_mut<T: PixelTypePrimitive>(
             image: &mut DynamicImageChannelView<'_>,
         ) {
-            let raw = DynamicImageChannelView::raw_data(&*image);
-            let created_from_mut_slice = raw.is_null();
-            if created_from_mut_slice {
-                // The buffer is exclusively borrowed for the lifetime of the channel, which is
-                // only written through, never reallocated or freed
-                return;
+            // Safety: The channel was created by `slice_mut_channel`
+            if let Some(original) = unsafe { original(image) } {
+                original.make_exclusive();
+                // Safety: `original` is the original of `image`
+                unsafe { reborrow_original::<T>(image, original) };
             }
-            let original = raw.cast::<DynamicImageChannelView<'_>>();
-            // Safety: The original channel is exclusively borrowed by this channel
-            let original = unsafe { &mut *original };
-            original.make_exclusive();
-            // The vtable of the original could have replaced the buffer, so the pointer is read
-            // after `make_exclusive`. Replacing `image` preserves the borrowed original, as the
-            // vtable drops nothing and `data` points to it again.
-            *image = unsafe {
-                crate::view::slice_mut_channel::<T>(
-                    DynamicImageChannelView::raw_ptr(original).cast_mut().cast(),
-                    original.width(),
-                    original.height(),
-                    original.pixel_elements(),
-                    original,
-                )
+        }
+
+        unsafe extern "C-unwind" fn try_make_original_mut<T: PixelTypePrimitive>(
+            image: &mut DynamicImageChannelView<'_>,
+        ) -> bool {
+            // Safety: The channel was created by `slice_mut_channel`
+            let Some(original) = (unsafe { original(image) }) else {
+                return true;
             };
+            let exclusive = original.try_make_exclusive();
+            // Safety: `original` is the original of `image`
+            unsafe { reborrow_original::<T>(image, original) };
+            exclusive
         }
 
         &ImageChannelVTable::new::<T>(
             crate::arc::clone_slice_into_arc_channel::<T>,
             make_original_mut::<T>,
+            try_make_original_mut::<T>,
             noop_drop,
+        )
+    };
+}
+
+/// The original channel, which a channel of [`SliceMutFactory`] borrows exclusively. `None`, if
+/// it borrows a mutable slice, whose buffer is exclusively borrowed for the lifetime of the
+/// channel, which is only written through, never reallocated or freed.
+///
+/// # Safety
+/// `image` has to be created by [`slice_mut_channel`]. The original mustn't be used through
+/// `image` while the result is alive.
+unsafe fn original<'b>(
+    image: &DynamicImageChannelView<'_>,
+) -> Option<&'b mut DynamicImageChannelView<'b>> {
+    let raw = DynamicImageChannelView::raw_data(image);
+    // Safety: The original channel is exclusively borrowed by this channel
+    (!raw.is_null()).then(|| unsafe { &mut *raw.cast::<DynamicImageChannelView<'_>>() })
+}
+
+/// Points `image` to the buffer of `original` again. Its `make_mut` and `try_make_mut` could have
+/// replaced the buffer. Replacing `image` preserves the borrowed original, as the vtable drops
+/// nothing and `data` points to it again.
+///
+/// # Safety
+/// `image` has to be created by [`slice_mut_channel`] for `original` (see [`original`])
+unsafe fn reborrow_original<T: PixelTypePrimitive>(
+    image: &mut DynamicImageChannelView<'_>,
+    original: &mut DynamicImageChannelView<'_>,
+) {
+    // Safety: The original is exclusively borrowed by `image`, which is replaced
+    *image = unsafe {
+        slice_mut_channel::<T>(
+            DynamicImageChannelView::raw_ptr(original).cast_mut().cast(),
+            original.width(),
+            original.height(),
+            original.pixel_elements(),
+            original,
         )
     };
 }

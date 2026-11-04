@@ -220,6 +220,23 @@ impl<'a, T: PixelType, const CHANNELS: usize> ImageView<'a, T, CHANNELS> {
         self.0.each_ref().map(ImageChannelView::buffer)
     }
 
+    /// Mutable access to the buffers without copying them, see [`ImageChannelView::buffer_mut`].
+    /// `None`, if any channel requires a copy. [`ImageView::make_mut`] copies in that case.
+    pub fn buffers_mut(&mut self) -> Option<[&mut [T]; CHANNELS]> {
+        // `try_make_mut` doesn't share the buffer of a channel, so the channels checked before
+        // stay exclusive
+        if self.0.iter_mut().all(ImageChannelView::try_make_exclusive) {
+            // Safety: All buffers are exclusive
+            Some(
+                self.0
+                    .each_mut()
+                    .map(|channel| unsafe { channel.buffer_mut_unchecked() }),
+            )
+        } else {
+            None
+        }
+    }
+
     /// Borrows the first channel (the single channel of a one-channel image).
     #[must_use]
     pub fn first(&self) -> &ImageChannelView<'a, T> {
@@ -251,6 +268,16 @@ impl<'a, T: PixelType> ImageView<'a, T, 1> {
 
     pub fn make_mut_flat(&mut self) -> &mut [T::Primitive] {
         self.0[0].make_mut_flat()
+    }
+
+    /// Mutable access to the buffer without copying it, see [`ImageChannelView::buffer_mut`]
+    pub fn buffer_mut(&mut self) -> Option<&mut [T]> {
+        self.0[0].buffer_mut()
+    }
+
+    /// Flat version of [`ImageView::buffer_mut`]
+    pub fn buffer_flat_mut(&mut self) -> Option<&mut [T::Primitive]> {
+        self.0[0].buffer_flat_mut()
     }
 }
 
