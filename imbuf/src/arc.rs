@@ -8,7 +8,7 @@ use std::{
 use crate::{
     DynamicImageChannel, DynamicImageChannelView, Image, ImageChannel, InvalidLenError, PixelType,
     PixelTypePrimitive,
-    channel::{ChannelFactory, ImageChannelVTable},
+    vtable::{ChannelFactory, ImageChannelVTable},
 };
 
 struct ArcFactory;

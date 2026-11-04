@@ -4,7 +4,7 @@ use std::num::{NonZeroU8, NonZeroU32};
 
 use crate::{
     DynamicImageChannel, DynamicImageChannelView, PixelTypePrimitive,
-    channel::{ChannelFactory, ImageChannelVTable},
+    vtable::{ChannelFactory, ImageChannelVTable},
 };
 
 /// Shared borrow of a buffer. `make_mut` copies the buffer into an `Arc`.

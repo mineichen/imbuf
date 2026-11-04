@@ -10,7 +10,7 @@ use std::{
 use crate::{
     DynamicImageChannel, DynamicImageChannelView, ImageChannel, ImageChannelView, InvalidLenError,
     PixelType, PixelTypePrimitive,
-    channel::{ChannelFactory, ImageChannelVTable},
+    vtable::{ChannelFactory, ImageChannelVTable},
 };
 
 /// Internal structure that holds a Vec (as raw parts) and reference counts
