@@ -21,7 +21,9 @@ const NZ_U8_2: NonZeroU8 = NonZeroU8::new(2).unwrap();
 struct Gray(u8);
 unsafe impl bytemuck::Zeroable for Gray {}
 unsafe impl bytemuck::Pod for Gray {}
-impl PixelTypePrimitive for Gray {}
+impl PixelTypePrimitive for Gray {
+    const TYPE_HINT: [u8; 8] = *b"gray\0\0\0\0";
+}
 
 /// Pod primitive with the same size as `f32`, but a smaller alignment
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -29,12 +31,17 @@ impl PixelTypePrimitive for Gray {}
 struct Rgba8([u8; 4]);
 unsafe impl bytemuck::Zeroable for Rgba8 {}
 unsafe impl bytemuck::Pod for Rgba8 {}
-impl PixelTypePrimitive for Rgba8 {}
+impl PixelTypePrimitive for Rgba8 {
+    // Uses all 8 bytes, so it has no nul terminator
+    const TYPE_HINT: [u8; 8] = *b"RGBA8888";
+}
 
 /// Primitive which is not Pod, as 0 is not a valid value
 #[derive(Clone, Copy, PartialEq, Debug)]
 struct NonZero(NonZeroU8);
-impl PixelTypePrimitive for NonZero {}
+impl PixelTypePrimitive for NonZero {
+    const TYPE_HINT: [u8; 8] = *b"nonzero\0";
+}
 
 #[test]
 fn pod_primitive_round_trips_through_dynamic_image() -> TestResult {
@@ -44,6 +51,7 @@ fn pod_primitive_round_trips_through_dynamic_image() -> TestResult {
     let expected = image.clone();
     let dynamic = DynamicImage::from(image);
     assert_eq!(dynamic.first().primitive_size().get(), 1);
+    assert_eq!(dynamic.first().type_hint(), "gray");
 
     let back = Image::<[Gray; 2], 1>::try_from(dynamic)?;
     assert_eq!(back, expected);
@@ -124,6 +132,8 @@ fn vtable_derives_layout_from_primitive() {
     let channel = misaligned_channel();
     assert_eq!(channel.primitive_size().get(), 4);
     assert_eq!(channel.primitive_alignment().get(), 1);
+    // The type hint uses all 8 bytes without a nul terminator
+    assert_eq!(channel.type_hint(), "RGBA8888");
 }
 
 #[test]
@@ -214,19 +224,25 @@ const ALIGNMENT_ATTEMPTS: usize = 64;
 #[derive(Clone, Copy, PartialEq, Debug, bytemuck::Zeroable, bytemuck::Pod)]
 #[repr(transparent)]
 struct Bytes4([u8; 4]);
-impl PixelTypePrimitive for Bytes4 {}
+impl PixelTypePrimitive for Bytes4 {
+    const TYPE_HINT: [u8; 8] = *b"bytes4\0\0";
+}
 
 /// Pod primitive with 16 bytes, but only aligned to 8
 #[derive(Clone, Copy, PartialEq, Debug, bytemuck::Zeroable, bytemuck::Pod)]
 #[repr(transparent)]
 struct Pair([u64; 2]);
-impl PixelTypePrimitive for Pair {}
+impl PixelTypePrimitive for Pair {
+    const TYPE_HINT: [u8; 8] = *b"pair\0\0\0\0";
+}
 
 /// Pod primitive with 16 bytes, which is aligned to 16
 #[derive(Clone, Copy, PartialEq, Debug, bytemuck::Zeroable, bytemuck::Pod)]
 #[repr(C, align(16))]
 struct Wide([u8; 16]);
-impl PixelTypePrimitive for Wide {}
+impl PixelTypePrimitive for Wide {
+    const TYPE_HINT: [u8; 8] = *b"wide\0\0\0\0";
+}
 
 #[test]
 fn miri_cloning_typed_view_of_other_primitive_keeps_alignment() -> TestResult {

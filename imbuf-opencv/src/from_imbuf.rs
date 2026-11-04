@@ -461,7 +461,9 @@ mod tests {
         struct F64(f64);
         unsafe impl bytemuck::Zeroable for F64 {}
         unsafe impl bytemuck::Pod for F64 {}
-        impl PixelTypePrimitive for F64 {}
+        impl PixelTypePrimitive for F64 {
+            const TYPE_HINT: [u8; 8] = *b"F64\0\0\0\0\0";
+        }
 
         let mut channel = DynamicImageChannel::new_vec(vec![F64(1.)], NZ_1, NZ_1)?;
 

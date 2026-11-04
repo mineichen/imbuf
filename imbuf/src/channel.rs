@@ -555,6 +555,9 @@ pub struct ImageChannelVTable {
     /// `make_mut` have at least the same alignment.
     pub(crate) primitive_alignment:
         unsafe extern "C-unwind" fn(&DynamicImageChannelView<'_>) -> NonZeroUsize,
+    /// [`PixelTypePrimitive::TYPE_HINT`] of the primitive the vtable was created for. Its name
+    /// is valid UTF-8, which `new` checks at compile time.
+    pub(crate) type_hint: [u8; 8],
 }
 
 // The version has to stay the first field, so every version of the crate can read it
@@ -564,8 +567,9 @@ impl ImageChannelVTable {
     /// ABI version of the vtables created by this version of the crate
     const ABI_VERSION: u64 = 0;
 
-    /// Vtable for channels, whose buffer contains values of the primitive `T`. The size and
-    /// alignment of the primitive are derived from `T`.
+    /// Vtable for channels, whose buffer contains values of the primitive `T`. The size,
+    /// alignment and [type hint](PixelTypePrimitive::TYPE_HINT) of the primitive are derived
+    /// from `T`. An invalid type hint fails to compile.
     ///
     /// The functions have to fulfill the following contract for channels created with this
     /// vtable:
@@ -593,6 +597,13 @@ impl ImageChannelVTable {
         make_mut: unsafe extern "C-unwind" fn(&mut DynamicImageChannelView<'_>),
         drop: unsafe extern "C-unwind" fn(&mut DynamicImageChannelView<'_>),
     ) -> Self {
+        // Checks the type hint at compile time, so `DynamicImageChannelView::type_hint` can't fail
+        const {
+            assert!(
+                crate::pixel::parse_type_hint(&T::TYPE_HINT).is_some(),
+                "Invalid PixelTypePrimitive::TYPE_HINT, the bytes before the first nul byte must be a str"
+            );
+        };
         Self {
             abi_version: Self::ABI_VERSION,
             clone,
@@ -600,6 +611,7 @@ impl ImageChannelVTable {
             drop,
             primitive_size: primitive_size::<T>,
             primitive_alignment: primitive_alignment::<T>,
+            type_hint: T::TYPE_HINT,
         }
     }
 }

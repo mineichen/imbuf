@@ -225,7 +225,9 @@ impl std::ops::DerefMut for DynamicImageView<'_> {
 ///
 /// #[derive(Clone, Copy, PartialEq)]
 /// struct NonZero(NonZeroU8);
-/// impl PixelTypePrimitive for NonZero {}
+/// impl PixelTypePrimitive for NonZero {
+///     const TYPE_HINT: [u8; 8] = *b"nonzero\0";
+/// }
 ///
 /// let channel = ImageChannel::new_vec(vec![NonZero(NonZeroU8::MIN)], NonZeroU32::MIN, NonZeroU32::MIN).unwrap();
 /// // Would allow writing 0 through `ImageChannel<u8>`
@@ -373,6 +375,21 @@ impl<'a> DynamicImageChannelView<'a> {
     pub fn primitive_alignment(&self) -> NonZeroUsize {
         // Safety: The vtable is able to work with the channel
         unsafe { (self.vtable.primitive_alignment)(self) }
+    }
+
+    /// Name of the primitive the vtable was created for
+    /// ([`PixelTypePrimitive::TYPE_HINT`](crate::PixelTypePrimitive::TYPE_HINT)), e.g. `"u8"`.
+    ///
+    /// It's only a hint: The buffer can be viewed as any [`Pod`] primitive with the same layout,
+    /// and channels created by `clone` or `make_mut` may report the hint of another primitive
+    /// with the same layout.
+    #[must_use]
+    pub const fn type_hint(&self) -> &'static str {
+        let vtable: &'static ImageChannelVTable = self.vtable;
+        match crate::pixel::parse_type_hint(&vtable.type_hint) {
+            Some(name) => name,
+            None => unreachable!(),
+        }
     }
 
     /// Debug check of the constraints of [`ImageChannelVTable`](crate::ImageChannelVTable) for
@@ -703,6 +720,7 @@ impl Debug for DynamicImageChannelView<'_> {
             .field("width", &self.width())
             .field("height", &self.height())
             .field("primitive_size", &self.primitive_size())
+            .field("type_hint", &self.type_hint())
             .field("pixel_elements", &self.pixel_elements())
             .finish()
     }
@@ -991,6 +1009,45 @@ mod tests {
         assert_eq!(3, rest.next().ok_or("missing channel")??[0]);
         assert_eq!(dynamic.first().buffer_flat::<u8>(), Ok(&[4][..]));
         Ok(())
+    }
+
+    #[test]
+    fn type_hint_of_builtin_primitives_is_their_name() -> TestResult {
+        fn assert_type_hint<T: crate::PixelTypePrimitive + Pod>() -> TestResult {
+            let channel = DynamicImageChannel::new_vec(vec![T::zeroed()], NZ_1, NZ_1)?;
+            assert_eq!(channel.type_hint(), std::any::type_name::<T>());
+            Ok(())
+        }
+        assert_type_hint::<u8>()?;
+        assert_type_hint::<i8>()?;
+        assert_type_hint::<u16>()?;
+        assert_type_hint::<i16>()?;
+        assert_type_hint::<u32>()?;
+        assert_type_hint::<i32>()?;
+        assert_type_hint::<u64>()?;
+        assert_type_hint::<i64>()?;
+        assert_type_hint::<usize>()?;
+        assert_type_hint::<isize>()?;
+        assert_type_hint::<f32>()?;
+        assert_type_hint::<f64>()?;
+        Ok(())
+    }
+
+    #[test]
+    fn type_hint_is_parsed_until_the_first_nul() {
+        use crate::pixel::parse_type_hint;
+        assert_eq!(parse_type_hint(b"u8\0\0\0\0\0\0"), Some("u8"));
+        assert_eq!(parse_type_hint(b"RGBA8888"), Some("RGBA8888"));
+        assert_eq!(parse_type_hint(b"\0\0\0\0\0\0\0\0"), Some(""));
+        // Bytes after the first nul byte are ignored
+        assert_eq!(parse_type_hint(b"ab\0\xFF\xFF\xFF\xFF\xFF"), Some("ab"));
+        // Multi byte characters, also if cut off by the end
+        assert_eq!(
+            parse_type_hint("µ8\0\0\0\0\0".as_bytes().try_into().unwrap()),
+            Some("µ8")
+        );
+        assert_eq!(parse_type_hint(b"1234567\xC2"), None);
+        assert_eq!(parse_type_hint(b"\xFF\0\0\0\0\0\0\0"), None);
     }
 
     #[test]
