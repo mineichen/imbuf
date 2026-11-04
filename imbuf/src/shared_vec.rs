@@ -10,7 +10,7 @@ use std::{
 use crate::{
     DynamicImageChannel, DynamicImageChannelView, ImageChannel, ImageChannelView, InvalidLenError,
     PixelType, PixelTypePrimitive,
-    channel::{ChannelFactory, ImageChannelVTable, primitive_alignment, primitive_size},
+    channel::{ChannelFactory, ImageChannelVTable},
 };
 
 /// Internal structure that holds a Vec (as raw parts) and reference counts
@@ -135,15 +135,11 @@ struct SharedVecFactory<T: 'static, const CHANNELS: usize>(PhantomData<(T, [(); 
 impl<T: PixelTypePrimitive, const CHANNELS: usize> ChannelFactory<T>
     for SharedVecFactory<T, CHANNELS>
 {
-    const VTABLE: &'static ImageChannelVTable = {
-        &ImageChannelVTable {
-            clone: clone_shared_vec::<T, CHANNELS>,
-            make_mut: make_mut_shared_vec::<T, CHANNELS>,
-            drop: drop_shared_vec::<T, CHANNELS>,
-            primitive_size: primitive_size::<T>,
-            primitive_alignment: primitive_alignment::<T>,
-        }
-    };
+    const VTABLE: &'static ImageChannelVTable = &ImageChannelVTable::new::<T>(
+        clone_shared_vec::<T, CHANNELS>,
+        make_mut_shared_vec::<T, CHANNELS>,
+        drop_shared_vec::<T, CHANNELS>,
+    );
 }
 
 /// Creates channels, which share the planar `vec` (all pixels of the first channel, then the

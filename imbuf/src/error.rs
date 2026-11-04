@@ -134,7 +134,7 @@ pub struct PixelLayout {
     /// Size of a single element (primitive) of a pixel
     pub primitive_size: NonZeroUsize,
     /// Alignment of the primitive. For a channel, it's the alignment, which every buffer of the
-    /// channel has (see [`ImageChannelVTable::primitive_alignment`](crate::ImageChannelVTable::primitive_alignment)).
+    /// channel has (see [`ImageChannelVTable::new`](crate::ImageChannelVTable::new)).
     /// A channel can be viewed as a pixel type, if its alignment is at least the one of the pixel
     /// type.
     pub primitive_alignment: NonZeroUsize,

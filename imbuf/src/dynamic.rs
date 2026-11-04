@@ -241,8 +241,7 @@ impl std::ops::DerefMut for DynamicImageView<'_> {
 /// the fields back into a channel.
 #[repr(C)]
 pub struct DynamicImageChannelView<'a> {
-    /// Pointer to the buffer, which is `len_flat()` primitives of the size
-    /// `vtable.primitive_size()` long
+    /// Pointer to the buffer, which is `len_flat()` primitives of `primitive_size()` bytes long
     ptr: *const u8,
     width: NonZeroU32,
     height: NonZeroU32,
@@ -257,27 +256,31 @@ pub struct DynamicImageChannelView<'a> {
 pub type DynamicImageChannel = DynamicImageChannelView<'static>;
 
 impl<'a> DynamicImageChannelView<'a> {
-    /// Creates a channel from its raw parts, e.g. to support a custom storage.
+    /// Creates a channel from its raw parts, e.g. to support a custom storage. `vtable` is created
+    /// for the primitive `T` of the buffer by
+    /// [`ImageChannelVTable::new::<T>`](crate::ImageChannelVTable::new).
     ///
     /// # Safety
     /// The following invariants have to hold:
-    /// - The size of the buffer in bytes (`width * height * pixel_elements * vtable.primitive_size()`)
+    /// - The size of the buffer in bytes (`width * height * pixel_elements * size_of::<T>()`)
     ///   doesn't exceed `isize::MAX` (like any slice), and the multiplications to calculate it
     ///   don't overflow, which implies that `width * height * pixel_elements` matches the buffer
     ///   length. [`DynamicImageChannelView::ensure_valid_flat_len`] checks the length, e.g. for
     ///   untrusted input.
-    /// - `ptr` is aligned to `vtable.primitive_alignment` of the channel, which is a power of two.
-    /// - `ptr` points to an initialized buffer of that size, which stays valid until `vtable.drop`
-    ///   is called and at least for `'a`. The buffer can be shared between instances.
+    /// - `ptr` is aligned for `T`.
+    /// - `ptr` points to an initialized buffer of that size, which stays valid until the `drop`
+    ///   function of the vtable is called and at least for `'a`. The buffer can be shared between
+    ///   instances.
     /// - Nothing else writes the buffer, while the channel (or a clone sharing the buffer) exists.
-    ///   The channel itself only writes it after `vtable.make_mut`, which makes it exclusive: Until
-    ///   the channel is cloned or dropped, nothing else accesses the buffer.
-    /// - `vtable` is able to work with `ptr` and `data` (see [`ImageChannelVTable`](crate::ImageChannelVTable)).
+    ///   The channel itself only writes it after calling the `make_mut` function of the vtable,
+    ///   which makes it exclusive: Until the channel is cloned or dropped, nothing else accesses
+    ///   the buffer.
+    /// - The functions of the vtable are able to work with `ptr` and `data` and fulfill the
+    ///   contract described in [`ImageChannelVTable::new`](crate::ImageChannelVTable::new).
     ///   Any bytes written through a `Pod` view of the buffer have to be valid for the vtable
-    ///   (e.g. the primitive of the vtable is `Pod` itself).
-    /// - `ptr` and `data` can be sent to and shared between threads. The functions of the vtable,
-    ///   which receive `&DynamicImageChannelView` (`clone`, `primitive_size` and
-    ///   `primitive_alignment`), can be called concurrently, as channels are `Sync`.
+    ///   (e.g. `T` is `Pod` itself).
+    /// - `ptr` and `data` can be sent to and shared between threads. The `clone` function of the
+    ///   vtable can be called concurrently, as channels are `Sync`.
     ///
     /// # Panics
     /// In debug builds, panics if `width * height * pixel_elements` overflows `usize` or the
@@ -309,13 +312,13 @@ impl<'a> DynamicImageChannelView<'a> {
         debug_assert!(
             channel.primitive_alignment().is_power_of_two()
                 && ptr.addr() % channel.primitive_alignment().get() == 0,
-            "The pointer of the raw parts isn't aligned to vtable.primitive_alignment"
+            "The pointer of the raw parts isn't aligned for the primitive of the vtable"
         );
         ManuallyDrop::into_inner(channel)
     }
 
-    /// Read access to the buffer pointer, e.g. to support a custom storage or implement
-    /// [`ImageChannelVTable`](crate::ImageChannelVTable).
+    /// Read access to the buffer pointer, e.g. to support a custom storage or implement the
+    /// functions of an [`ImageChannelVTable`](crate::ImageChannelVTable).
     #[must_use]
     pub const fn raw_ptr(channel: &Self) -> *const u8 {
         channel.ptr
@@ -477,7 +480,8 @@ impl<'a> DynamicImageChannelView<'a> {
 
     pub(crate) unsafe fn make_mut_flat_unchecked<T: PixelTypePrimitive>(&mut self) -> &mut [T] {
         self.make_exclusive();
-        // Safety: Size and alignment are checked after make_mut, which might reallocate
+        // make_mut might reallocate, but keeps the primitive (contract of the vtable). Size and
+        // alignment are checked again in debug builds.
         debug_assert_eq!(Ok(()), self.ensure_fits_primitive::<T>());
         // Safety: Forwarded to the caller
         unsafe { slice::from_raw_parts_mut(self.ptr.cast::<T>().cast_mut(), self.len_flat()) }

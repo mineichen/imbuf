@@ -1,6 +1,6 @@
 use assert_matches::assert_matches;
 use std::{
-    num::{NonZeroU8, NonZeroU32, NonZeroUsize},
+    num::{NonZeroU8, NonZeroU32},
     panic::{AssertUnwindSafe, catch_unwind},
 };
 
@@ -14,7 +14,6 @@ const NZ_1: NonZeroU32 = NonZeroU32::MIN;
 const NZ_2: NonZeroU32 = NonZeroU32::new(2).unwrap();
 const NZ_U8_1: NonZeroU8 = NonZeroU8::MIN;
 const NZ_U8_2: NonZeroU8 = NonZeroU8::new(2).unwrap();
-const NZ_USIZE_4: NonZeroUsize = NonZeroUsize::new(4).unwrap();
 
 /// Pod primitive with the same size as `u8`
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -99,21 +98,10 @@ unsafe extern "C-unwind" fn panicking_make_mut(_: &mut DynamicImageChannelView<'
     panic!("The static buffer is read only")
 }
 unsafe extern "C-unwind" fn noop_drop(_: &mut DynamicImageChannelView<'_>) {}
-unsafe extern "C-unwind" fn four_bytes(_: &DynamicImageChannelView<'_>) -> NonZeroUsize {
-    NZ_USIZE_4
-}
-unsafe extern "C-unwind" fn one_byte(_: &DynamicImageChannelView<'_>) -> NonZeroUsize {
-    NonZeroUsize::MIN
-}
 
-/// Vtable for `Rgba8` primitives
-static STATIC_VTABLE: ImageChannelVTable = ImageChannelVTable {
-    clone: panicking_clone,
-    make_mut: panicking_make_mut,
-    drop: noop_drop,
-    primitive_size: four_bytes,
-    primitive_alignment: one_byte,
-};
+/// Vtable for `Rgba8` primitives. It's a `const fn`, so the vtable can be created in a `static`
+static STATIC_VTABLE: ImageChannelVTable =
+    ImageChannelVTable::new::<Rgba8>(panicking_clone, panicking_make_mut, noop_drop);
 
 /// One `Rgba8` pixel, which starts at an address which is not aligned for `f32`
 fn misaligned_channel() -> DynamicImageChannel {
@@ -129,6 +117,13 @@ fn misaligned_channel() -> DynamicImageChannel {
             std::ptr::null_mut(),
         )
     }
+}
+
+#[test]
+fn vtable_derives_layout_from_primitive() {
+    let channel = misaligned_channel();
+    assert_eq!(channel.primitive_size().get(), 4);
+    assert_eq!(channel.primitive_alignment().get(), 1);
 }
 
 #[test]
@@ -159,13 +154,8 @@ unsafe extern "C-unwind" fn shrinking_make_mut(image: &mut DynamicImageChannelVi
 }
 
 /// Vtable for `Rgba8` primitives, which changes the dimensions
-static SHRINKING_VTABLE: ImageChannelVTable = ImageChannelVTable {
-    clone: shrinking_clone,
-    make_mut: shrinking_make_mut,
-    drop: noop_drop,
-    primitive_size: four_bytes,
-    primitive_alignment: one_byte,
-};
+static SHRINKING_VTABLE: ImageChannelVTable =
+    ImageChannelVTable::new::<Rgba8>(shrinking_clone, shrinking_make_mut, noop_drop);
 
 /// Two `Rgba8` pixels with a vtable, which changes the dimensions
 fn shrinking_channel() -> ImageChannel<Rgba8> {

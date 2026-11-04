@@ -8,7 +8,7 @@ use bytemuck::Pod;
 use crate::{
     DynamicImageChannel, DynamicImageChannelView, Image, ImageChannel, InvalidLenError, PixelType,
     PixelTypePrimitive,
-    channel::{ChannelFactory, ImageChannelVTable, primitive_alignment, primitive_size},
+    channel::{ChannelFactory, ImageChannelVTable},
 };
 
 struct VecFactory;
@@ -178,13 +178,11 @@ impl DynamicImageChannel {
 }
 
 impl<T: PixelTypePrimitive> ChannelFactory<T> for VecFactory {
-    const VTABLE: &'static ImageChannelVTable = &ImageChannelVTable {
+    const VTABLE: &'static ImageChannelVTable = &ImageChannelVTable::new::<T>(
+        crate::arc::clone_slice_into_arc_channel::<T>,
         make_mut,
-        drop: drop_vec_channel::<T>,
-        clone: crate::arc::clone_slice_into_arc_channel::<T>,
-        primitive_size: primitive_size::<T>,
-        primitive_alignment: primitive_alignment::<T>,
-    };
+        drop_vec_channel::<T>,
+    );
 }
 
 unsafe extern "C-unwind" fn make_mut(_image: &mut DynamicImageChannelView<'_>) {

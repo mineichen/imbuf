@@ -13,7 +13,7 @@ use bytemuck::{NoUninit, Pod};
 use crate::{
     PixelTypePrimitive,
     dynamic::DynamicImageChannelView,
-    error::{IncompatibleChannel, IncompatibleChannelError, InvalidLenError},
+    error::{IncompatibleChannel, IncompatibleChannelError, InvalidLenError, PixelLayout},
     pixel::PixelType,
 };
 
@@ -158,9 +158,10 @@ impl<'a, TP: PixelType> ImageChannelView<'a, TP> {
     /// `TP::Primitive`, and any bytes, if `TP::Primitive` is `Pod` (the channel can be converted
     /// into a [`DynamicImageChannelView`]).
     ///
-    /// Furthermore, `vtable.primitive_size` must return `size_of::<TP::Primitive>()` and
-    /// `vtable.primitive_alignment` at least `align_of::<TP::Primitive>()`, so `ptr` and all future
-    /// buffers of the channel are aligned for `TP::Primitive`.
+    /// Furthermore, the vtable has to be created for `TP::Primitive`
+    /// ([`ImageChannelVTable::new::<TP::Primitive>`](ImageChannelVTable::new)) or a primitive
+    /// with the same size and at least the same alignment, so `ptr` and all future buffers of the
+    /// channel are aligned for `TP::Primitive`.
     ///
     /// # Panics
     /// In debug builds, panics if the vtable doesn't fit `TP` or the checks of
@@ -239,7 +240,8 @@ impl<'a, TP: PixelType> ImageChannelView<'a, TP> {
 
     pub fn make_mut(&mut self) -> &mut [TP] {
         let flat = self.make_mut_flat();
-        // `make_mut` keeps `pixel_elements` (checked), so the flat buffer contains whole pixels
+        // `make_mut` keeps `pixel_elements` (contract of the vtable, checked in debug builds), so
+        // the flat buffer contains whole pixels
         let len = flat.len() / usize::from(TP::ELEMENTS.get());
         // Safety: The flat buffer contains `len` pixels with `TP::ELEMENTS` primitives each
         unsafe { slice::from_raw_parts_mut(flat.as_mut_ptr().cast::<TP>(), len) }
@@ -442,62 +444,178 @@ impl<TP: PixelType> Debug for ImageChannelView<'_, TP> {
     }
 }
 
-/// `VTable` for [`DynamicImageChannelView`] and [`ImageChannelView`]
+/// `VTable` of the storage of a [`DynamicImageChannelView`] or [`ImageChannelView`], e.g. of the
+/// buffer of another library
 ///
-/// The vtable itself is untyped, but its functions are usually generic over the primitive of the
-/// buffer. All functions use the "C-unwind" ABI, so panics propagate instead of aborting.
+/// It's created by [`ImageChannelVTable::new`] for the primitive of the buffer. Storages with a
+/// primitive type, which is only known at runtime (e.g. an `OpenCV` `Mat`, which can contain `u8`
+/// or `u16`), use one vtable per primitive. `new` is a `const fn`, so the
+/// `&'static ImageChannelVTable`, which channels require, can be created in a `const`, `static`
+/// or inline `const` block (also in generic code):
 ///
-/// The functions receive a [`DynamicImageChannelView`], whose raw parts are accessible through
-/// the safe associated functions [`DynamicImageChannelView::raw_ptr`],
-/// [`DynamicImageChannelView::raw_data`] and [`DynamicImageChannelView::raw_vtable`]. To mutate
-/// a channel, replace it entirely by assigning a new `DynamicImageChannelView` (the old channel
-/// is dropped via its vtable).
+/// ```
+/// use std::{num::NonZeroU32, ptr};
+/// use imbuf::{DynamicImageChannelView, ImageChannel, ImageChannelVTable, PixelTypePrimitive};
+///
+/// /// Channel, which holds its buffer in a `Box<[T]>`
+/// fn boxed_channel<T: PixelTypePrimitive>(
+///     buffer: Box<[T]>,
+///     width: NonZeroU32,
+///     height: NonZeroU32,
+/// ) -> ImageChannel<T> {
+///     DynamicImageChannelView::ensure_valid_len(width, height, buffer.len()).unwrap();
+///     // Safety: The length is checked. The Box keeps the buffer alive until the vtable drops it
+///     unsafe {
+///         ImageChannel::new_with_vtable(
+///             Box::into_raw(buffer).cast::<T>(),
+///             width,
+///             height,
+///             box_vtable::<T>(),
+///             ptr::null_mut(),
+///         )
+///     }
+/// }
+///
+/// fn box_vtable<T: PixelTypePrimitive>() -> &'static ImageChannelVTable {
+///     const { &ImageChannelVTable::new::<T>(clone_box::<T>, make_box_mut, drop_box::<T>) }
+/// }
+///
+/// unsafe extern "C-unwind" fn clone_box<'a, T: PixelTypePrimitive>(
+///     channel: &DynamicImageChannelView<'a>,
+/// ) -> DynamicImageChannelView<'a> {
+///     // Safety: The buffer contains values of T
+///     let copy: Box<[T]> = unsafe { channel.buffer_flat_unchecked::<T>() }.into();
+///     // Safety: The copy has the same length and is owned by the new channel
+///     unsafe {
+///         DynamicImageChannelView::from_raw_parts(
+///             Box::into_raw(copy).cast::<u8>(),
+///             channel.width(),
+///             channel.height(),
+///             channel.pixel_elements(),
+///             box_vtable::<T>(),
+///             ptr::null_mut(),
+///         )
+///     }
+/// }
+///
+/// unsafe extern "C-unwind" fn make_box_mut(_: &mut DynamicImageChannelView<'_>) {
+///     // The Box is never shared, as `clone` copies it
+/// }
+///
+/// unsafe extern "C-unwind" fn drop_box<T>(channel: &mut DynamicImageChannelView<'_>) {
+///     let buffer = ptr::slice_from_raw_parts_mut(
+///         DynamicImageChannelView::raw_ptr(channel).cast::<T>().cast_mut(),
+///         channel.len_flat(),
+///     );
+///     // Safety: The buffer was created by `Box::into_raw` with this length
+///     drop(unsafe { Box::from_raw(buffer) });
+/// }
+///
+/// let channel = boxed_channel(vec![1u16, 2].into(), NonZeroU32::new(2).unwrap(), NonZeroU32::MIN);
+/// let mut clone = channel.clone();
+/// clone.make_mut()[0] = 3;
+/// assert_eq!(channel.buffer(), &[1, 2]);
+/// assert_eq!(clone.buffer(), &[3, 2]);
+/// ```
+///
+/// All functions use the "C-unwind" ABI, so panics propagate instead of aborting. They receive a
+/// [`DynamicImageChannelView`], whose raw parts are accessible through the safe associated
+/// functions [`DynamicImageChannelView::raw_ptr`], [`DynamicImageChannelView::raw_data`] and
+/// [`DynamicImageChannelView::raw_vtable`]. To mutate a channel, replace it entirely by assigning
+/// a new `DynamicImageChannelView` (the old channel is dropped via its vtable).
 /// For channels of non-`Pod` primitives (only reachable through [`ImageChannelView`]), the
-/// buffer is only valid for the primitive the vtable was built for.
+/// buffer is only valid for the primitive the vtable was created for.
 ///
-/// The functions have to work with channels of any lifetime `'a`, as owned channels can be
-/// coerced to shorter lifetimes. `'a` is alive during all calls.
+/// Creating a vtable is safe, but [`DynamicImageChannelView::from_raw_parts`] and
+/// [`ImageChannelView::new_with_vtable`] require its functions to fulfill the contract
+/// described in [`ImageChannelVTable::new`].
+///
+/// # ABI
+/// The vtable is `#[repr(C)]` and starts with an ABI version (currently `0`), followed by the
+/// entries of that version. Later versions only append entries, which have a default for older
+/// vtables (e.g. one created by another dylib, which uses an older version of this crate), so
+/// entries can be added without breaking changes.
 #[repr(C)]
 pub struct ImageChannelVTable {
-    /// Returns a channel with the same dimensions, `pixel_elements` and content, which can be used
-    /// independently. The buffer can be shared until `make_mut` is called. It has to keep
-    /// `primitive_size` and `primitive_alignment` (see there). Changed dimensions or
-    /// `pixel_elements` panic.
-    pub clone: for<'a> unsafe extern "C-unwind" fn(
+    /// Version of the layout. Entries, which were added after this version, aren't present and
+    /// must not be read.
+    pub(crate) abi_version: u64,
+    pub(crate) clone: for<'a> unsafe extern "C-unwind" fn(
         &DynamicImageChannelView<'a>,
     ) -> DynamicImageChannelView<'a>,
-    /// Ensures that the buffer is exclusively owned by the channel, so it can be mutated.
-    /// The entire channel can be replaced (assigning a `DynamicImageChannelView` drops the old one),
-    /// but like `clone`, it has to keep the dimensions, `pixel_elements`, content, `primitive_size`
-    /// and `primitive_alignment`. Changed dimensions or `pixel_elements` panic.
-    pub make_mut: unsafe extern "C-unwind" fn(&mut DynamicImageChannelView<'_>),
-    /// Releases the buffer and `data`. The channel is not used afterwards.
-    pub drop: unsafe extern "C-unwind" fn(&mut DynamicImageChannelView<'_>),
-    /// Size of the primitive of the channel in bytes, e.g. read from `data` for storages with a
-    /// runtime primitive type. It has to return the same value for the entire lifetime of the
-    /// channel, and channels created by `clone` and `make_mut` have to return the same value.
-    pub primitive_size: unsafe extern "C-unwind" fn(&DynamicImageChannelView<'_>) -> NonZeroUsize,
+    pub(crate) make_mut: unsafe extern "C-unwind" fn(&mut DynamicImageChannelView<'_>),
+    pub(crate) drop: unsafe extern "C-unwind" fn(&mut DynamicImageChannelView<'_>),
+    /// Size of the primitive of the channel in bytes. It's the same for the entire lifetime of the
+    /// channel and for channels created by `clone` and `make_mut`. It receives the channel, so
+    /// storages with a runtime primitive type could use a single vtable (not public yet).
+    pub(crate) primitive_size:
+        unsafe extern "C-unwind" fn(&DynamicImageChannelView<'_>) -> NonZeroUsize,
     /// Alignment, which every buffer of the channel is guaranteed to have, as a power of two.
-    /// It's a guarantee for the current and all future buffers, not only the current pointer:
-    /// Typed views, which were checked against it, stay valid when `make_mut` reallocates.
-    /// It has to return the same value for the entire lifetime of the channel, and channels
-    /// created by `clone` and `make_mut` have to return at least the same value.
-    pub primitive_alignment:
+    /// It's the same for the entire lifetime of the channel, and channels created by `clone` and
+    /// `make_mut` have at least the same alignment.
+    pub(crate) primitive_alignment:
         unsafe extern "C-unwind" fn(&DynamicImageChannelView<'_>) -> NonZeroUsize,
 }
 
-/// `ImageChannelVTable::primitive_size` for the primitive `T`
-pub(crate) unsafe extern "C-unwind" fn primitive_size<T: PixelTypePrimitive>(
-    _: &DynamicImageChannelView<'_>,
-) -> NonZeroUsize {
-    crate::PixelLayout::of_primitive::<T>(NonZeroU8::MIN).primitive_size
+// The version has to stay the first field, so every version of the crate can read it
+const _: () = assert!(mem::offset_of!(ImageChannelVTable, abi_version) == 0);
+
+impl ImageChannelVTable {
+    /// ABI version of the vtables created by this version of the crate
+    const ABI_VERSION: u64 = 0;
+
+    /// Vtable for channels, whose buffer contains values of the primitive `T`. The size and
+    /// alignment of the primitive are derived from `T`.
+    ///
+    /// The functions have to fulfill the following contract for channels created with this
+    /// vtable:
+    /// - They work with channels of any lifetime `'a`, as owned channels can be coerced to
+    ///   shorter lifetimes. `'a` is alive during all calls.
+    /// - `clone` returns a channel with the same dimensions, `pixel_elements` and content, which
+    ///   can be used independently. The buffer can be shared until `make_mut` is called. The
+    ///   vtable of the returned channel is created for `T` as well (or for a primitive with the
+    ///   same size and at least the same alignment).
+    /// - `make_mut` ensures that the buffer is exclusively owned by the channel, so it can be
+    ///   mutated. The entire channel can be replaced (assigning a `DynamicImageChannelView` drops
+    ///   the old one), but it has to keep the dimensions, `pixel_elements` and content, and the
+    ///   primitive like `clone`.
+    /// - `drop` releases the buffer and `data`. The channel is not used afterwards.
+    /// - `clone` can be called concurrently, as channels are `Sync`.
+    ///
+    /// Typed views rely on this contract, so violating it is undefined behavior. Debug builds
+    /// check the dimensions, `pixel_elements` and the primitive after `clone` and `make_mut` and
+    /// panic, if they changed.
+    #[must_use]
+    pub const fn new<T: PixelTypePrimitive>(
+        clone: for<'a> unsafe extern "C-unwind" fn(
+            &DynamicImageChannelView<'a>,
+        ) -> DynamicImageChannelView<'a>,
+        make_mut: unsafe extern "C-unwind" fn(&mut DynamicImageChannelView<'_>),
+        drop: unsafe extern "C-unwind" fn(&mut DynamicImageChannelView<'_>),
+    ) -> Self {
+        Self {
+            abi_version: Self::ABI_VERSION,
+            clone,
+            make_mut,
+            drop,
+            primitive_size: primitive_size::<T>,
+            primitive_alignment: primitive_alignment::<T>,
+        }
+    }
 }
 
-/// `ImageChannelVTable::primitive_alignment` for the primitive `T`
-pub(crate) unsafe extern "C-unwind" fn primitive_alignment<T: PixelTypePrimitive>(
+/// `primitive_size` of [`ImageChannelVTable::new`] for the primitive `T`
+unsafe extern "C-unwind" fn primitive_size<T: PixelTypePrimitive>(
     _: &DynamicImageChannelView<'_>,
 ) -> NonZeroUsize {
-    const { NonZeroUsize::new(align_of::<T>()).expect("Alignments are never zero") }
+    const { PixelLayout::of_primitive::<T>(NonZeroU8::MIN).primitive_size }
+}
+
+/// `primitive_alignment` of [`ImageChannelVTable::new`] for the primitive `T`
+unsafe extern "C-unwind" fn primitive_alignment<T: PixelTypePrimitive>(
+    _: &DynamicImageChannelView<'_>,
+) -> NonZeroUsize {
+    const { PixelLayout::of_primitive::<T>(NonZeroU8::MIN).primitive_alignment }
 }
 
 // Workaround inability to have static which uses outer Generics

@@ -8,7 +8,7 @@ use std::{
 use crate::{
     DynamicImageChannel, DynamicImageChannelView, Image, ImageChannel, InvalidLenError, PixelType,
     PixelTypePrimitive,
-    channel::{ChannelFactory, ImageChannelVTable, primitive_alignment, primitive_size},
+    channel::{ChannelFactory, ImageChannelVTable},
 };
 
 struct ArcFactory;
@@ -137,13 +137,11 @@ impl<T: PixelTypePrimitive> ChannelFactory<T> for ArcFactory {
             }
         }
 
-        &ImageChannelVTable {
-            drop: clear_arc_channel::<T>,
-            clone: clone_arc_channel::<T>,
-            make_mut: make_mut::<T>,
-            primitive_size: primitive_size::<T>,
-            primitive_alignment: primitive_alignment::<T>,
-        }
+        &ImageChannelVTable::new::<T>(
+            clone_arc_channel::<T>,
+            make_mut::<T>,
+            clear_arc_channel::<T>,
+        )
     };
 }
 

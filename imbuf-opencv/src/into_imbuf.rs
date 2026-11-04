@@ -1,7 +1,7 @@
 use std::{
     ffi::c_void,
     mem::ManuallyDrop,
-    num::{NonZeroU8, NonZeroU32, NonZeroUsize},
+    num::{NonZeroU8, NonZeroU32},
     sync::atomic::{AtomicI32, Ordering},
 };
 
@@ -115,33 +115,27 @@ struct BorrowedMatFactory;
 struct BorrowedMutMatFactory;
 
 impl<P: PixelTypePrimitive + Pod> MatChannelFactory<P> for OwnedMatFactory {
-    const VTABLE: &'static ImageChannelVTable = &ImageChannelVTable {
-        clone: share_mat_channel::<P>,
-        make_mut: make_owned_mat_channel_mut::<P>,
-        drop: drop_mat_channel,
-        primitive_size: primitive_size::<P>,
-        primitive_alignment: primitive_alignment::<P>,
-    };
+    const VTABLE: &'static ImageChannelVTable = &ImageChannelVTable::new::<P>(
+        share_mat_channel::<P>,
+        make_owned_mat_channel_mut::<P>,
+        drop_mat_channel,
+    );
 }
 
 impl<P: PixelTypePrimitive + Pod> MatChannelFactory<P> for BorrowedMatFactory {
-    const VTABLE: &'static ImageChannelVTable = &ImageChannelVTable {
-        clone: share_mat_channel::<P>,
-        make_mut: make_borrowed_mat_channel_mut::<P>,
-        drop: drop_mat_channel,
-        primitive_size: primitive_size::<P>,
-        primitive_alignment: primitive_alignment::<P>,
-    };
+    const VTABLE: &'static ImageChannelVTable = &ImageChannelVTable::new::<P>(
+        share_mat_channel::<P>,
+        make_borrowed_mat_channel_mut::<P>,
+        drop_mat_channel,
+    );
 }
 
 impl<P: PixelTypePrimitive + Pod> MatChannelFactory<P> for BorrowedMutMatFactory {
-    const VTABLE: &'static ImageChannelVTable = &ImageChannelVTable {
-        clone: copy_mat_channel::<P>,
-        make_mut: write_through_mat_channel,
-        drop: drop_mat_channel,
-        primitive_size: primitive_size::<P>,
-        primitive_alignment: primitive_alignment::<P>,
-    };
+    const VTABLE: &'static ImageChannelVTable = &ImageChannelVTable::new::<P>(
+        copy_mat_channel::<P>,
+        write_through_mat_channel,
+        drop_mat_channel,
+    );
 }
 
 /// # Safety
@@ -410,16 +404,6 @@ fn mat_buffer_is_exclusive(mat: &Mat) -> bool {
 unsafe fn mat_view(image: &DynamicImageChannelView<'_>) -> ManuallyDrop<Mat> {
     let data = DynamicImageChannelView::raw_data(image);
     ManuallyDrop::new(unsafe { Mat::from_raw(data.cast()) })
-}
-
-unsafe extern "C-unwind" fn primitive_size<P>(_: &DynamicImageChannelView<'_>) -> NonZeroUsize {
-    const { NonZeroUsize::new(size_of::<P>()).expect("Primitives are not zero sized") }
-}
-
-unsafe extern "C-unwind" fn primitive_alignment<P>(
-    _: &DynamicImageChannelView<'_>,
-) -> NonZeroUsize {
-    const { NonZeroUsize::new(align_of::<P>()).expect("Alignments are never zero") }
 }
 
 /// Shares the buffer with a new `Mat`, which keeps the vtable (owned or borrowed for `'a`)

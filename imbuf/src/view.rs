@@ -4,7 +4,7 @@ use std::num::{NonZeroU8, NonZeroU32};
 
 use crate::{
     DynamicImageChannel, DynamicImageChannelView, PixelTypePrimitive,
-    channel::{ChannelFactory, ImageChannelVTable, primitive_alignment, primitive_size},
+    channel::{ChannelFactory, ImageChannelVTable},
 };
 
 /// Shared borrow of a buffer. `make_mut` copies the buffer into a Vec.
@@ -63,13 +63,8 @@ pub(crate) unsafe fn slice_mut_channel<'a, T: PixelTypePrimitive>(
 }
 
 impl<T: PixelTypePrimitive> ChannelFactory<T> for SliceFactory {
-    const VTABLE: &'static ImageChannelVTable = &ImageChannelVTable {
-        clone: clone_slice_channel,
-        make_mut: copy_into_arc::<T>,
-        drop: noop_drop,
-        primitive_size: primitive_size::<T>,
-        primitive_alignment: primitive_alignment::<T>,
-    };
+    const VTABLE: &'static ImageChannelVTable =
+        &ImageChannelVTable::new::<T>(clone_slice_channel, copy_into_arc::<T>, noop_drop);
 }
 
 impl<T: PixelTypePrimitive> ChannelFactory<T> for SliceMutFactory {
@@ -102,13 +97,11 @@ impl<T: PixelTypePrimitive> ChannelFactory<T> for SliceMutFactory {
             };
         }
 
-        &ImageChannelVTable {
-            clone: crate::arc::clone_slice_into_arc_channel::<T>,
-            make_mut: make_original_mut::<T>,
-            drop: noop_drop,
-            primitive_size: primitive_size::<T>,
-            primitive_alignment: primitive_alignment::<T>,
-        }
+        &ImageChannelVTable::new::<T>(
+            crate::arc::clone_slice_into_arc_channel::<T>,
+            make_original_mut::<T>,
+            noop_drop,
+        )
     };
 }
 
