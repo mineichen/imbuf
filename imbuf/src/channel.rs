@@ -62,22 +62,55 @@ impl<TP: PixelType> PartialEq for ImageChannelView<'_, TP> {
 impl<'a, TP: PixelType> ImageChannelView<'a, TP> {
     /// Borrows `input` without copying. Mutable access (e.g. [`ImageChannelView::make_mut`])
     /// copies the buffer, `input` stays unchanged.
-    pub fn new_slice(
+    pub const fn new_slice(
         input: &'a [TP],
         width: NonZeroU32,
         height: NonZeroU32,
     ) -> Result<Self, InvalidLenError> {
-        DynamicImageChannelView::ensure_valid_len(width, height, input.len())?;
+        match DynamicImageChannelView::ensure_valid_len(width, height, input.len()) {
+            // Safety: The size is checked
+            Ok(()) => Ok(unsafe { Self::new_slice_unchecked(input, width, height) }),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Like [`ImageChannelView::new_slice`], but panics on an invalid length. Usable in const
+    /// contexts, where the `Result` of [`ImageChannelView::new_slice`] can't be unwrapped, as the
+    /// channel has a destructor:
+    ///
+    /// ```
+    /// use std::num::NonZeroU32;
+    /// use imbuf::ImageChannel;
+    ///
+    /// const NZ_2: NonZeroU32 = NonZeroU32::new(2).unwrap();
+    /// const CHANNEL: ImageChannel<u8> = ImageChannel::new_slice_unwrap(&[1, 2, 3, 4], NZ_2, NZ_2);
+    /// assert_eq!(CHANNEL.buffer(), [1, 2, 3, 4]);
+    /// ```
+    ///
+    /// # Panics
+    /// If `width * height` overflows `usize` or doesn't match `input.len()`
+    #[must_use]
+    pub const fn new_slice_unwrap(input: &'a [TP], width: NonZeroU32, height: NonZeroU32) -> Self {
+        assert!(
+            DynamicImageChannelView::ensure_valid_len(width, height, input.len()).is_ok(),
+            "The length of the slice doesn't match width * height"
+        );
         // Safety: The size is checked
-        Ok(unsafe { Self::new_slice_unchecked(input, width, height) })
+        unsafe { Self::new_slice_unchecked(input, width, height) }
     }
 
     /// # Safety
     /// `width * height` mustn't overflow `usize` and has to match `input.len()`
-    unsafe fn new_slice_unchecked(input: &'a [TP], width: NonZeroU32, height: NonZeroU32) -> Self {
-        debug_assert_eq!(
-            DynamicImageChannelView::ensure_valid_len(width, height, input.len()),
-            Ok(()),
+    pub(crate) const unsafe fn new_slice_unchecked(
+        input: &'a [TP],
+        width: NonZeroU32,
+        height: NonZeroU32,
+    ) -> Self {
+        debug_assert!(
+            matches!(
+                DynamicImageChannelView::ensure_valid_len(width, height, input.len()),
+                Ok(())
+            ),
             "Incompatible Buffer-Size"
         );
         // Safety: The size is valid (precondition) and the buffer is borrowed for 'a
@@ -494,25 +527,25 @@ mod tests {
 
     const NZ_1: NonZeroU32 = NonZeroU32::MIN;
     const NZ_2: NonZeroU32 = NonZeroU32::new(2).unwrap();
+    const RGB8: ImageChannel<[u8; 3]> = ImageChannel::new_slice_unwrap(&[[1, 2, 3]], NZ_1, NZ_1);
 
     #[test]
     fn try_from_dynamic_channel() -> TestResult {
-        let data = vec![[1u8, 2, 3]];
-        let ch = ImageChannel::<[u8; 3]>::new_vec(data, NZ_1, NZ_1)?;
-        let image: Image<[u8; 3], 1> = [ch].try_into()?;
-        let dyn_image: DynamicImage = image.into();
-        let (restored_channel, mut rest) =
-            dyn_image.into_mapped_channels(ImageChannel::<[u8; 3]>::try_from);
+        let dyn_image = DynamicImage::from(Image::from(RGB8));
+        let try_from = ImageChannel::<[u8; 3]>::try_from;
+        let (restored_channel, mut rest) = dyn_image.into_mapped_channels(try_from);
         assert_eq!(None, rest.next());
         let restored_channel = restored_channel?;
         assert_eq!(restored_channel.buffer(), &[[1u8, 2, 3]]);
-        Image::<[u8; 3], 1>::try_from([restored_channel])?;
+        assert_eq!(Image::from(restored_channel), Image::from(RGB8));
         Ok(())
     }
 
     #[test]
     fn try_from_dynamic_channel_checks_primitive_and_pixel_elements() -> TestResult {
-        let dynamic = DynamicImageChannel::from(ImageChannel::<u16>::new_vec(vec![1], NZ_1, NZ_1)?);
+        let dynamic = DynamicImageChannel::from(
+            const { ImageChannel::new_slice_unwrap(&[1u16], NZ_1, NZ_1) },
+        );
 
         assert_matches!(
             ImageChannel::<u8>::try_from(dynamic.clone()),
@@ -692,10 +725,15 @@ mod tests {
     }
 
     #[test]
-    fn miri_test_buffer_flat_bytes() -> TestResult {
-        let image = ImageChannel::new_vec(vec![42u16], NZ_1, NZ_1)?;
+    #[should_panic = "doesn't match"]
+    fn new_slice_unwrap_with_wrong_size_panics() {
+        let _ = ImageChannel::new_slice_unwrap(&[1u8, 2, 3], NZ_2, NZ_1);
+    }
+
+    #[test]
+    fn miri_test_buffer_flat_bytes() {
+        let image = const { ImageChannel::new_slice_unwrap(&[42u16], NZ_1, NZ_1) };
         assert_eq!(image.buffer_flat_bytes(), &[42u8, 0]);
-        Ok(())
     }
 
     #[test]

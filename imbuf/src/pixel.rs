@@ -104,10 +104,10 @@ pub(crate) fn flat_arc<TP: PixelType>(input: Arc<[TP]>) -> Arc<[TP::Primitive]> 
     // Safety: TP::Primitive is expected to be an aligned fraction of TP
     unsafe { Arc::from_raw(core::ptr::slice_from_raw_parts(ptr, len)) }
 }
-pub(crate) fn flat_slice<TP: PixelType>(input: &[TP]) -> &[TP::Primitive] {
+pub(crate) const fn flat_slice<TP: PixelType>(input: &[TP]) -> &[TP::Primitive] {
     // Multiplying with `TP::ELEMENTS` cannot overflow, as a slice longer than
     // `usize::MAX / TP::ELEMENTS` (a multiple of it in bytes) cannot exist
-    let len = input.len() * usize::from(TP::ELEMENTS.get());
+    let len = input.len() * (TP::ELEMENTS.get() as usize);
 
     // Safety: TP::Primitive is expected to be an aligned fraction of TP
     unsafe { core::slice::from_raw_parts(input.as_ptr().cast::<TP::Primitive>(), len) }

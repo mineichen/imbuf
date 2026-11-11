@@ -532,6 +532,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Slow and only safe code")]
     fn in_place_with_all_small_tile_lengths() {
         check_in_place_round_trip::<1>(5, 3);
         check_in_place_round_trip::<2>(17, 5);
@@ -540,6 +541,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Slow and only safe code")]
     fn in_place_with_default_tile_len() {
         // Two whole tiles and a tail per plane
         let plane_len = 2 * default_tile_len::<u64>() + 3;
@@ -564,7 +566,9 @@ mod tests {
     where
         T: Copy + PartialEq + std::fmt::Debug + 'static,
     {
-        for len in 0..=max_len {
+        // Miri only has to check the unsafe byte views, which don't depend on the length
+        let min_len = if cfg!(miri) { max_len } else { 0 };
+        for len in min_len..=max_len {
             let planar = (0..C * len).map(&element).collect::<Vec<_>>();
             let planes = split_planes::<T, C>(&planar, len);
             let expected = (0..len)

@@ -383,13 +383,17 @@ mod tests {
     const NZ_1: NonZeroU32 = NonZeroU32::MIN;
     const NZ_2: NonZeroU32 = NonZeroU32::new(2).unwrap();
     const NZ_U8_3: NonZeroU8 = NonZeroU8::new(3).unwrap();
+    const RGB8: Image<[u8; 3], 1> = Image::new_slice_unwrap(&[[1, 2, 3]], NZ_1, NZ_1);
+    const RGB16: Image<[u16; 3], 1> = Image::new_slice_unwrap(&[[1, 2, 3]], NZ_1, NZ_1);
+    const PLANAR_RGB8: Image<u8, 3> = Image::new_slice_unwrap(&[1, 2, 3], NZ_1, NZ_1);
+    const LUMA8: Image<u8, 1> = Image::new_slice_unwrap(&[1], NZ_1, NZ_1);
 
     #[test]
     fn ensure_single_channel() -> TestResult {
-        let single = DynamicImage::from(Image::<[u8; 3], 1>::new_vec(vec![[1, 2, 3]], NZ_1, NZ_1)?);
+        let single = DynamicImage::from(RGB8);
         assert_eq!(single.ensure_single_channel(), Ok(()));
 
-        let planar = DynamicImage::from(Image::<u8, 3>::new_vec(vec![1, 2, 3], NZ_1, NZ_1)?);
+        let planar = DynamicImage::from(PLANAR_RGB8);
         assert_eq!(
             planar.ensure_single_channel(),
             Err(IncompatibleChannelCount {
@@ -401,21 +405,19 @@ mod tests {
     }
 
     #[test]
-    fn image_with_other_dimensions_is_not_uniform() -> TestResult {
-        let ch1 = ImageChannel::<u8>::new_vec(vec![1, 1], NZ_1, NZ_2)?;
-        let ch2 = ImageChannel::<u8>::new_vec(vec![1], NZ_1, NZ_1)?;
+    fn image_with_other_dimensions_is_not_uniform() {
+        let ch1 = const { ImageChannel::new_slice_unwrap(&[1u8, 1], NZ_1, NZ_2) };
+        let ch2 = const { ImageChannel::new_slice_unwrap(&[1u8], NZ_1, NZ_1) };
         let dynamic = DynamicImage::from_channels(ch1.into(), [ch2.into()]);
         assert!(!dynamic.is_uniform());
-        Ok(())
     }
 
     #[test]
-    fn image_with_other_primitive_size_is_not_uniform() -> TestResult {
-        let ch1 = ImageChannel::<u8>::new_vec(vec![1], NZ_1, NZ_1)?;
-        let ch2 = ImageChannel::<u16>::new_vec(vec![1], NZ_1, NZ_1)?;
+    fn image_with_other_primitive_size_is_not_uniform() {
+        let ch1 = const { ImageChannel::new_slice_unwrap(&[1u8], NZ_1, NZ_1) };
+        let ch2 = const { ImageChannel::new_slice_unwrap(&[1u16], NZ_1, NZ_1) };
         let dynamic = DynamicImage::from_channels(ch1.into(), [ch2.into()]);
         assert!(!dynamic.is_uniform());
-        Ok(())
     }
 
     #[test]
@@ -428,8 +430,7 @@ mod tests {
 
     #[test]
     fn first_mapped_returns_ref() -> TestResult {
-        let ch = Image::<u8, 3>::new_vec(vec![1, 2, 3], NZ_1, NZ_1)?;
-        let dynamic = DynamicImage::from(ch);
+        let dynamic = DynamicImage::from(PLANAR_RGB8);
         let (first, mut rest) = dynamic.mapped_channels(DynamicImageChannel::buffer_flat_bytes);
         assert_eq!(1, first[0]);
         assert_eq!(2, rest.next().ok_or("missing channel")?[0]);
@@ -439,8 +440,7 @@ mod tests {
 
     #[test]
     fn first_mapped_returns_mut() -> TestResult {
-        let ch = Image::<u8, 3>::new_vec(vec![1, 2, 3], NZ_1, NZ_1)?;
-        let mut dynamic = DynamicImage::from(ch);
+        let mut dynamic = DynamicImage::from(PLANAR_RGB8);
         let (first, mut rest) = dynamic.mapped_channels_mut(|x| x.make_mut_flat::<u8>());
         first?[0] = 4;
         assert_eq!(2, rest.next().ok_or("missing channel")??[0]);
@@ -515,9 +515,10 @@ mod tests {
     }
 
     #[test]
-    fn borrow_from_different_size_mut_dynamic_image() -> TestResult {
-        let mut dynamic = DynamicImage::from(Image::<u8, 2>::new_vec(vec![0, 1], NZ_1, NZ_1)?);
-        dynamic[1] = ImageChannel::<u8>::new_vec(vec![0, 1], NZ_1, NZ_2)?.into();
+    fn borrow_from_different_size_mut_dynamic_image() {
+        let image = const { Image::<u8, 2>::new_slice_unwrap(&[0, 1], NZ_1, NZ_1) };
+        let mut dynamic = DynamicImage::from(image);
+        dynamic[1] = const { ImageChannel::new_slice_unwrap(&[0u8, 1], NZ_1, NZ_2) }.into();
 
         assert_matches!(
             ImageView::<u8, 2>::try_from(&mut dynamic),
@@ -535,7 +536,6 @@ mod tests {
             dynamic.try_cast_mut::<u8, 2>(),
             Err(IncompatibleImageError::MixedImageSizes { .. })
         );
-        Ok(())
     }
 
     #[test]
@@ -584,8 +584,7 @@ mod tests {
 
     #[test]
     fn try_into_typed_dynamic_image() -> TestResult {
-        let rgb = Image::<[u8; 3], 1>::new_vec(vec![[1, 2, 3]], NZ_1, NZ_1)?;
-        let dynamic = DynamicImage::from(rgb);
+        let dynamic = DynamicImage::from(RGB8);
         assert_matches!(
             dynamic.clone().try_into_typed::<u8, 1>(),
             Err(IncompatibleImageError::Channel(_))
@@ -597,8 +596,7 @@ mod tests {
 
     #[test]
     fn create_from_luma_u8() -> TestResult {
-        let luma = Image::<u8, 1>::new_vec(vec![1], NZ_1, NZ_1)?;
-        let dynamic = DynamicImage::from(luma);
+        let dynamic = DynamicImage::from(LUMA8);
         assert_eq!(1, dynamic.channels.len());
         let luma_back: Image<u8, 1> = dynamic.try_into()?;
         assert_eq!(luma_back.into_vec(), vec![1]);
@@ -607,8 +605,7 @@ mod tests {
 
     #[test]
     fn create_from_luma_rgb16_interleaved() -> TestResult {
-        let luma = Image::<[u16; 3], 1>::new_vec(vec![[1u16, 2, 3]], NZ_1, NZ_1)?;
-        let dynamic = DynamicImage::from(luma);
+        let dynamic = DynamicImage::from(RGB16);
         assert_eq!(1, dynamic.channels.len());
         let luma_back: Image<[u16; 3], 1> = dynamic.try_into()?;
         assert_eq!(luma_back.into_vec(), vec![[1u16, 2, 3]]);
@@ -617,8 +614,7 @@ mod tests {
 
     #[test]
     fn create_from_rgb8_interleaved() -> TestResult {
-        let rgb = Image::<[u8; 3], 1>::new_vec(vec![[1u8, 2, 3]], NZ_1, NZ_1)?;
-        let dynamic = DynamicImage::from(rgb);
+        let dynamic = DynamicImage::from(RGB8);
         assert_eq!(1, dynamic.channels.len());
         assert_eq!(1, dynamic[0].primitive_size().get());
         assert_eq!(3, dynamic[0].pixel_elements().get());
@@ -629,8 +625,7 @@ mod tests {
     }
     #[test]
     fn create_from_luma_rgb8_planar() -> TestResult {
-        let luma = Image::<u8, 3>::new_vec(vec![1u8, 2, 3], NZ_1, NZ_1)?;
-        let dynamic = DynamicImage::from(luma);
+        let dynamic = DynamicImage::from(PLANAR_RGB8);
         assert_eq!(3, dynamic.channels.len());
         let luma_back: Image<u8, 3> = dynamic.try_into()?;
         assert_eq!(luma_back.into_vec(), vec![1u8, 2, 3]);
@@ -658,9 +653,8 @@ mod tests {
     }
 
     #[test]
-    fn create_from_incompatible_image() -> TestResult {
-        let luma = Image::<u8, 1>::new_vec(vec![42], NZ_1, NZ_1)?;
-        let dynamic = DynamicImage::from(luma.clone());
+    fn create_from_incompatible_image() {
+        let dynamic = DynamicImage::from(LUMA8);
         assert_matches!(
             Image::<u16, 1>::try_from(dynamic.clone()),
             Err(IncompatibleImageError::Channel(_))
@@ -685,17 +679,15 @@ mod tests {
                         ..
                     }),
                 ..
-            }) if image == DynamicImage::from(luma)
+            }) if image == DynamicImage::from(LUMA8)
                 && second_primitive_size.get() == 2
                 && second_primitive_alignment.get() == 2
         );
-        Ok(())
     }
 
     #[test]
-    fn create_from_image_with_other_pixel_elements() -> TestResult {
-        let rgb = Image::<[u8; 3], 1>::new_vec(vec![[1u8, 2, 3]], NZ_1, NZ_1)?;
-        let dynamic = DynamicImage::from(rgb);
+    fn create_from_image_with_other_pixel_elements() {
+        let dynamic = DynamicImage::from(RGB8);
         assert_matches!(
             ImageView::<u8, 1>::try_from(&dynamic),
             Err(IncompatibleImageError::Channel(IncompatibleChannelError {
@@ -712,6 +704,5 @@ mod tests {
                 target_pixel_type: "u8",
             })) if first_primitive_size.get() == 1
         );
-        Ok(())
     }
 }

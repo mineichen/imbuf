@@ -1,5 +1,6 @@
 use std::{
     fmt::{self, Debug, Formatter},
+    mem::MaybeUninit,
     num::{NonZeroU8, NonZeroU32},
     ptr,
 };
@@ -62,19 +63,69 @@ impl<'a, T: PixelType, const CHANNELS: usize> ImageView<'a, T, CHANNELS> {
     /// Borrows the planar `input` (all pixels of the first channel, then the second...) without
     /// copying. Mutable access (e.g. [`ImageView::make_mut`]) copies the buffers, `input` stays
     /// unchanged.
-    #[allow(clippy::missing_panics_doc)]
-    pub fn new_slice(
+    pub const fn new_slice(
         input: &'a [T],
         width: NonZeroU32,
         height: NonZeroU32,
     ) -> Result<Self, InvalidLenError> {
-        let len = input.len();
-        Self::ensure_valid_len(width, height, len)?;
-        let mut chunks = input.chunks_exact(len / CHANNELS);
-        Ok(Self(std::array::from_fn(|_| {
-            let chunk = chunks.next().expect("Length is checked");
-            ImageChannelView::new_slice(chunk, width, height).expect("Length is checked")
-        })))
+        match Self::ensure_valid_len(width, height, input.len()) {
+            // Safety: The size is checked
+            Ok(()) => Ok(unsafe { Self::new_slice_unchecked(input, width, height) }),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Like [`ImageView::new_slice`], but panics on an invalid length. Usable in const contexts,
+    /// where the `Result` of [`ImageView::new_slice`] can't be unwrapped, as the image has a
+    /// destructor:
+    ///
+    /// ```
+    /// use std::num::NonZeroU32;
+    /// use imbuf::Image;
+    ///
+    /// const NZ_2: NonZeroU32 = NonZeroU32::new(2).unwrap();
+    /// const IMAGE: Image<u8, 2> = Image::new_slice_unwrap(&[1, 2, 3, 4], NZ_2, NonZeroU32::MIN);
+    /// assert_eq!(IMAGE.buffers(), [[1, 2], [3, 4]]);
+    /// ```
+    ///
+    /// # Panics
+    /// If `width * height * CHANNELS` overflows `usize` or doesn't match `input.len()`
+    #[must_use]
+    pub const fn new_slice_unwrap(input: &'a [T], width: NonZeroU32, height: NonZeroU32) -> Self {
+        assert!(
+            Self::ensure_valid_len(width, height, input.len()).is_ok(),
+            "The length of the slice doesn't match width * height * CHANNELS"
+        );
+        // Safety: The size is checked
+        unsafe { Self::new_slice_unchecked(input, width, height) }
+    }
+
+    /// # Safety
+    /// `width * height * CHANNELS` mustn't overflow `usize` and has to match `input.len()`
+    const unsafe fn new_slice_unchecked(
+        input: &'a [T],
+        width: NonZeroU32,
+        height: NonZeroU32,
+    ) -> Self {
+        let channel_len = input.len() / CHANNELS;
+        let mut channels = [const { MaybeUninit::<ImageChannelView<'a, T>>::uninit() }; CHANNELS];
+        let mut rest = input;
+        let mut i = 0;
+        while i < CHANNELS {
+            let (chunk, tail) = rest.split_at(channel_len);
+            // Safety: Each chunk has `width * height` elements (precondition)
+            channels[i]
+                .write(unsafe { ImageChannelView::new_slice_unchecked(chunk, width, height) });
+            rest = tail;
+            i += 1;
+        }
+        // Safety: All channels are initialized. `MaybeUninit<X>` has the layout of `X`
+        Self(unsafe {
+            channels
+                .as_ptr()
+                .cast::<[ImageChannelView<'a, T>; CHANNELS]>()
+                .read()
+        })
     }
 
     /// Mutably borrows the planar `input` without copying. Mutable access
@@ -391,6 +442,13 @@ impl<'a, T: PixelType, const CHANNELS: usize> From<ImageView<'a, T, CHANNELS>>
     }
 }
 
+/// A single channel is always a valid image, see [`ImageView::from_channel`]
+impl<'a, T: PixelType> From<ImageChannelView<'a, T>> for ImageView<'a, T, 1> {
+    fn from(channel: ImageChannelView<'a, T>) -> Self {
+        Self::from_channel(channel)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use assert_matches::assert_matches;
@@ -403,6 +461,7 @@ mod tests {
 
     const NZ_1: NonZeroU32 = NonZeroU32::MIN;
     const NZ_2: NonZeroU32 = NonZeroU32::new(2).unwrap();
+    const LUMA8: ImageChannel<u8> = ImageChannel::new_slice_unwrap(&[0, 64, 128, 192], NZ_2, NZ_2);
 
     #[test]
     fn first_channel_access() -> TestResult {
@@ -415,7 +474,7 @@ mod tests {
 
     #[test]
     fn create_image_from_borrowed_channels() -> TestResult {
-        let channel = ImageChannel::<u8>::new_vec(vec![0u8, 64, 128, 192], NZ_2, NZ_2)?;
+        let channel = LUMA8;
         let image = ImageView::try_from([channel.view()])?;
         assert_eq!(image.buffer(), &[0u8, 64, 128, 192]);
         assert_eq!(image.buffer().as_ptr(), channel.buffer().as_ptr());
@@ -424,6 +483,17 @@ mod tests {
         assert_eq!(image.len_per_channel_flat(), 4);
         assert_eq!(image.buffers(), [[0u8, 64, 128, 192]]);
         Ok(())
+    }
+
+    #[test]
+    fn image_from_single_channel() {
+        let channel = LUMA8;
+        let image = ImageView::from(channel.view());
+        assert_eq!(image.buffer().as_ptr(), channel.buffer().as_ptr());
+
+        let image: Image<u8, 1> = LUMA8.into();
+        assert_eq!(image.dimensions(), (NZ_2, NZ_2));
+        assert_eq!(image.into_channels(), [LUMA8]);
     }
 
     #[test]
@@ -440,6 +510,12 @@ mod tests {
             }) if image[1].buffer() == [2, 3]
         );
         Ok(())
+    }
+
+    #[test]
+    #[should_panic = "doesn't match"]
+    fn new_slice_unwrap_with_wrong_size_panics() {
+        let _ = ImageView::<u8, 2>::new_slice_unwrap(&[1, 2, 3], NZ_2, NZ_1);
     }
 
     #[test]
@@ -653,13 +729,18 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "Slow, the miri_transpose_* tests cover the unsafe code"
+    )]
     fn transpose_large_image_in_place() -> TestResult {
-        // Exceeds the tiles of the in-place transposition
+        // 89 * 97 has no divisor near the tile length of 4096 bytes, so the planes are split into
+        // two tiles and a tail
         let (width, height) = (
+            NonZeroU32::new(89).ok_or("zero")?,
             NonZeroU32::new(97).ok_or("zero")?,
-            NonZeroU32::new(61).ok_or("zero")?,
         );
-        let len = 97 * 61;
+        let len = 89 * 97;
         let planar = (0..3 * len)
             .map(|i| u8::try_from(i % 251))
             .collect::<Result<Vec<_>, _>>()?;

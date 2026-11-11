@@ -121,6 +121,32 @@ impl<'a> DynamicImageChannelView<'a> {
         ManuallyDrop::into_inner(channel)
     }
 
+    /// Const version of [`DynamicImageChannelView::from_raw_parts`] without its debug checks of
+    /// the byte length and alignment (they call the vtable, which isn't possible in const).
+    /// The `debug_assert!`s just help catch developer mistakes, so they are not absolutely
+    /// necessary.
+    ///
+    /// # Safety
+    /// See [`DynamicImageChannelView::from_raw_parts`]
+    pub(crate) const unsafe fn from_raw_parts_const(
+        ptr: *const u8,
+        width: NonZeroU32,
+        height: NonZeroU32,
+        pixel_elements: NonZeroU8,
+        vtable: &'static ImageChannelVTable,
+        data: *mut (),
+    ) -> Self {
+        Self {
+            ptr,
+            width,
+            height,
+            vtable,
+            data,
+            pixel_elements,
+            lifetime: PhantomData,
+        }
+    }
+
     /// Read access to the buffer pointer, e.g. to support a custom storage or implement the
     /// functions of an [`ImageChannelVTable`](crate::ImageChannelVTable).
     #[must_use]

@@ -19,15 +19,16 @@ struct SliceMutFactory;
 /// # Safety
 /// `ptr` has to point to `width * height * pixel_elements` initialized values of `T`, which are
 /// not mutated during `'a`.
-pub(crate) unsafe fn slice_channel<'a, T: PixelTypePrimitive>(
+pub(crate) const unsafe fn slice_channel<'a, T: PixelTypePrimitive>(
     ptr: *const T,
     width: NonZeroU32,
     height: NonZeroU32,
     pixel_elements: NonZeroU8,
 ) -> DynamicImageChannelView<'a> {
-    // Safety: Forwarded to the caller. The drop is a no-op, as the buffer is borrowed
+    // Safety: Forwarded to the caller. The drop is a no-op, as the buffer is borrowed. The
+    // buffer of initialized `T` is aligned and its size in bytes can't exceed `isize::MAX`
     unsafe {
-        DynamicImageChannelView::from_raw_parts(
+        DynamicImageChannelView::from_raw_parts_const(
             ptr.cast(),
             width,
             height,
