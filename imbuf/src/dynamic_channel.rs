@@ -149,18 +149,27 @@ impl<'a> DynamicImageChannelView<'a> {
 
     /// Read access to the buffer pointer, e.g. to support a custom storage or implement the
     /// functions of an [`ImageChannelVTable`](crate::ImageChannelVTable).
+    ///
+    /// This accessor is a assoc function, because regular users never need it and shouldn't be bothered
+    /// with vtable details when simply using images or channels.
     #[must_use]
     pub const fn raw_ptr(channel: &Self) -> *const u8 {
         channel.ptr
     }
 
-    /// Read access to the storage specific data, e.g. to support a custom storage.
+    /// Read access to the storage specific data, e.g. to support a custom storage.    
+    ///
+    /// This accessor is a assoc function, because regular users never need it and shouldn't be bothered
+    /// with vtable details when simply using images or channels.
     #[must_use]
     pub const fn raw_data(channel: &Self) -> *mut () {
         channel.data
     }
 
     /// Read access to the vtable, e.g. to support a custom storage.
+    ///
+    /// This accessor is a assoc function, because regular users never need it and shouldn't be bothered
+    /// with vtable details when simply using images or channels.
     #[must_use]
     pub const fn raw_vtable(channel: &Self) -> &'static ImageChannelVTable {
         channel.vtable
