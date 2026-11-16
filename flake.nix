@@ -113,6 +113,10 @@
           '';
           testMsrvScript = pkgs.writeShellScript "test-msrv" ''
             set -euo pipefail
+            # Like the dev shell, also when run outside of it: libclang for the opencv binding
+            # generator, the rpath for the test binaries
+            ${pkgs.lib.toShellVars devEnv}
+            export ${pkgs.lib.concatStringsSep " " (builtins.attrNames devEnv)}
             export PATH="${rustMsrv}/bin:${pkgs.lib.makeBinPath (opencvBuildInputs ++ wasmTestInputs ++ [ pkgs.git ])}:$PATH"
             # Don't invalidate the build cache of the development toolchain
             export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-target/msrv}"
