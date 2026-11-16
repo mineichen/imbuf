@@ -15,11 +15,22 @@ categories = ["multimedia::images", "graphics", "data-structures"]
 imbuf.workspace = true
 thiserror.workspace = true
 image = { version = "0.25", default-features = false }
+# Decodes the raw samples of all TIFF pages, which `image` 0.25 can't represent in general.
+# Pinned to the version `image` 0.25 depends on (not the latest `tiff`), so only one copy of
+# `tiff` is compiled. Bump it together with `image`.
+tiff = { version = "0.10.3", optional = true }
+bytemuck = { workspace = true, optional = true }
+
+[features]
+# Enables TIFF decoding in `load_from_memory`, loading each page as a channel with its raw samples
+tiff = ["dep:tiff", "dep:bytemuck", "image/tiff"]
 
 [dev-dependencies]
 assert_matches.workspace = true
 testresult.workspace = true
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "tiff"] }
+# Same version as `image` uses, see `[dependencies]`
+tiff = "0.10.3"
 
 [lints]
 workspace = true

@@ -2,10 +2,12 @@
 
 mod from_imbuf;
 mod into_imbuf;
+mod load;
 mod ref_image;
 
 pub use from_imbuf::{ImbufAsImage, ImbufAsImageMut, ImbufIntoImage};
 pub use into_imbuf::{ImageIntoImbuf, IntoImbufError, IntoImbufErrorReason};
+pub use load::load_from_memory;
 pub use ref_image::{DynamicRefImage, DynamicRefImageMut};
 
 /// The buffer length did not match the image dimensions.
