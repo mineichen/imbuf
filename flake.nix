@@ -25,11 +25,21 @@
           ];
           # Pinned to the MSRV (`rust-version` in Cargo.toml), used by `nix run .#test`.
           # Update both together.
+          rustMsrvChannel = {
+            channel = "1.89.0";
+            sha256 = "sha256-+9FmLhAOezBZCOziO0Qct1NOrfpjNsXxc/8I0c7BdKE=";
+          };
           rustMsrv = with inputs.fenix.packages.${system}; combine [
-            (toolchainOf {
-              channel = "1.89.0";
-              sha256 = "sha256-+9FmLhAOezBZCOziO0Qct1NOrfpjNsXxc/8I0c7BdKE=";
-            }).toolchain
+            (toolchainOf rustMsrvChannel).toolchain
+            # For the browser tests of imbuf-websys
+            (targets.wasm32-unknown-unknown.toolchainOf rustMsrvChannel).rust-std
+          ];
+          # Runs the imbuf-websys tests in a headless Firefox. Firefox and geckodriver are only
+          # packaged for Linux in nixpkgs
+          wasmTestInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+            pkgs.wasm-pack
+            pkgs.firefox
+            pkgs.geckodriver
           ];
           rustNightlyWithMiri = with inputs.fenix.packages.${system}; combine [
             (latest.withComponents [
@@ -103,11 +113,17 @@
           '';
           testMsrvScript = pkgs.writeShellScript "test-msrv" ''
             set -euo pipefail
-            export PATH="${rustMsrv}/bin:${pkgs.lib.makeBinPath (opencvBuildInputs ++ [ pkgs.git ])}:$PATH"
+            export PATH="${rustMsrv}/bin:${pkgs.lib.makeBinPath (opencvBuildInputs ++ wasmTestInputs ++ [ pkgs.git ])}:$PATH"
             # Don't invalidate the build cache of the development toolchain
             export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-target/msrv}"
             rustc --version
-            exec cargo test --workspace --all-features "$@"
+            cargo test --workspace --all-features "$@"
+            ${if pkgs.stdenv.hostPlatform.isLinux then ''
+              # wasm-pack downloads the wasm-bindgen test runner matching Cargo.lock on first use
+              wasm-pack test --headless --firefox --geckodriver "${pkgs.geckodriver}/bin/geckodriver" imbuf-websys
+            '' else ''
+              echo "Skipping the browser tests of imbuf-websys (Firefox is only packaged for Linux)"
+            ''}
           '';
           coverageScript = inputs.devtools.lib.cargoTarpaulin {
             inherit pkgs rust;

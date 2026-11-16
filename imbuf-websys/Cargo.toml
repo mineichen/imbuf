@@ -1,0 +1,36 @@
+[package]
+name = "imbuf-websys"
+version = "0.1.0"
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Decodes images into imbuf image buffers with the image decoders of the browser (web-sys)."
+readme = "README.md"
+keywords = ["image", "wasm", "browser", "decoder", "buffer"]
+categories = ["multimedia::images", "wasm", "web-programming"]
+
+[dependencies]
+imbuf.workspace = true
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+  "Blob",
+  "ColorSpaceConversion",
+  "ImageBitmap",
+  "ImageBitmapOptions",
+  "ImageData",
+  "OffscreenCanvas",
+  "OffscreenCanvasRenderingContext2d",
+  "PremultiplyAlpha",
+  "Window",
+  "WorkerGlobalScope",
+] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[lints]
+workspace = true

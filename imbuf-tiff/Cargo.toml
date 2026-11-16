@@ -1,0 +1,24 @@
+[package]
+name = "imbuf-tiff"
+version = "0.1.0"
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Decodes TIFFs with their raw samples (any integer/float type, any sample count, one channel per page) into imbuf image buffers."
+readme = "README.md"
+keywords = ["image", "tiff", "decoder", "buffer"]
+categories = ["multimedia::images", "multimedia::encoding"]
+
+[dependencies]
+bytemuck.workspace = true
+imbuf.workspace = true
+# Same version as `image` 0.25 depends on, so only one copy of `tiff` is compiled, if both are used
+tiff = "0.11"
+
+[dev-dependencies]
+testresult.workspace = true
+
+[lints]
+workspace = true

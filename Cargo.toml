@@ -4,6 +4,8 @@ members = [
   "imbuf",
   "imbuf-image",
   "imbuf-opencv",
+  "imbuf-tiff",
+  "imbuf-websys",
 ]
 
 [workspace.package]

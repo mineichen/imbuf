@@ -48,3 +48,5 @@ code in this repository is exactly the code you would write.
 - `imbuf` - the core buffer crate.
 - `imbuf-opencv` - OpenCV bindings.
 - `imbuf-image` - `image` crate conversions.
+- `imbuf-tiff` - TIFF decoding with raw samples (any sample type, one channel per page).
+- `imbuf-websys` - Image decoding with the decoders of the browser (`web-sys`).

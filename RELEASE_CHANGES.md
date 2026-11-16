@@ -1,7 +1,7 @@
 # Release changes
 
 Pending changes for the upcoming releases of the unreleased `imbuf-image` /
-`imbuf-opencv` 0.1.0 crates. `imbuf` changes are listed in `imbuf/Releases.md`
+`imbuf-opencv` / `imbuf-tiff` / `imbuf-websys` 0.1.0 crates. `imbuf` changes are listed in `imbuf/Releases.md`
 (0.4.0), further breaking `imbuf` changes are tracked in `BREAKING_CHANGES.md`.
 
 ## imbuf-image 0.1.0 (unreleased)
@@ -27,6 +27,7 @@ Pending changes for the upcoming releases of the unreleased `imbuf-image` /
 - Remove the unreachable `IncompatibleLayoutError { channels: None,
   pixel_elements: None }` error path for `image::DynamicImage` receivers (all
   10 variants are supported).
+- `load_from_memory` has no `tiff` feature anymore. Raw TIFF decoding moved to `imbuf-tiff`.
 - Add `#[non_exhaustive]` to `DynamicRefImage` and `DynamicRefImageMut`: they
   mirror `image::DynamicImage`'s variants, so they grow whenever the `image`
   crate adds a pixel format.
@@ -54,3 +55,14 @@ Pending changes for the upcoming releases of the unreleased `imbuf-image` /
 - `as_opencv`/`as_opencv_mut` fail with `StsOutOfRange` for images, whose width or height
   exceeds `i32::MAX`. Previously, they wrapped to negative `Mat` sizes.
 - `ImbufAsOpencvMut` for typed images requires `Pod` primitives, as `OpenCV` can write any value.
+
+## imbuf-tiff 0.1.0 (unreleased)
+
+- New crate with `load_from_memory`, which decodes TIFFs with their raw samples (moved from the
+  `tiff` feature of `imbuf-image`). Fails with `io::ErrorKind::Unsupported`, if the data isn't a
+  TIFF or a page needs a conversion (e.g. CMYK, palette, 1 bit).
+
+## imbuf-websys 0.1.0 (unreleased)
+
+- New crate with an async `load_from_memory`, which decodes images with the browser
+  (`createImageBitmap` and `OffscreenCanvas`) into `Image<[u8; 4], 1>` and fails with the thrown `JsValue`.
