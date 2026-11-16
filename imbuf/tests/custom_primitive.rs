@@ -50,7 +50,7 @@ fn pod_primitive_round_trips_through_dynamic_image() -> TestResult {
     let data_ptr = image.buffer().as_ptr() as usize;
     let expected = image.clone();
     let dynamic = DynamicImage::from(image);
-    assert_eq!(dynamic.first().primitive_size().get(), 1);
+    assert_eq!(dynamic.first().primitive_bit_size().get(), 8);
     assert_eq!(dynamic.first().type_hint(), "gray");
 
     let back = Image::<[Gray; 2], 1>::try_from(dynamic)?;
@@ -133,7 +133,7 @@ fn misaligned_channel() -> DynamicImageChannel {
 #[test]
 fn vtable_derives_layout_from_primitive() {
     let channel = misaligned_channel();
-    assert_eq!(channel.primitive_size().get(), 4);
+    assert_eq!(channel.primitive_bit_size().get(), 32);
     assert_eq!(channel.primitive_alignment().get(), 1);
     // The type hint uses all 8 bytes without a nul terminator
     assert_eq!(channel.type_hint(), "RGBA8888");

@@ -13,11 +13,12 @@ use opencv::{
     core::{Code, DataType, Mat},
 };
 
-/// Primitive sizes of the supported depths. A [`DynamicImageChannel`] only knows the size of its
-/// primitive, so it is viewed as the primitive [`crate::OpencvIntoImbuf`] creates for that size.
-const U8_SIZE: usize = size_of::<u8>();
-const U16_SIZE: usize = size_of::<u16>();
-const F32_SIZE: usize = size_of::<f32>();
+/// Primitive sizes of the supported depths in bits. A [`DynamicImageChannel`] only knows the size
+/// of its primitive, so it is viewed as the primitive [`crate::OpencvIntoImbuf`] creates for that
+/// size.
+const U8_BITS: usize = u8::BITS as usize;
+const U16_BITS: usize = u16::BITS as usize;
+const F32_BITS: usize = size_of::<f32>() * U8_BITS;
 
 /// Borrows an [`imbuf`] buffer as an `OpenCV` [`Mat`] view without copying.
 ///
@@ -71,7 +72,7 @@ fn unsupported_primitive(channel: &DynamicImageChannelView<'_>) -> opencv::Error
     opencv::Error::new(
         Code::StsUnsupportedFormat.into(),
         format!(
-            "unsupported format: primitives must have 1, 2 or 4 bytes and be aligned, got {}",
+            "unsupported format: primitives must have 8, 16 or 32 bits and be aligned, got {}",
             channel.pixel_layout()
         ),
     )
@@ -97,10 +98,10 @@ impl ImbufAsOpencv for DynamicImageChannelView<'_> {
             Ok(BoxedRef::from(mat))
         }
 
-        match self.primitive_size().get() {
-            U8_SIZE => view::<u8>(self),
-            U16_SIZE => view::<u16>(self),
-            F32_SIZE => view::<f32>(self),
+        match self.primitive_bit_size().get() {
+            U8_BITS => view::<u8>(self),
+            U16_BITS => view::<u16>(self),
+            F32_BITS => view::<f32>(self),
             _ => Err(unsupported_primitive(self)),
         }
     }
@@ -121,10 +122,10 @@ impl ImbufAsOpencvMut for DynamicImageChannelView<'_> {
             Ok(BoxedRefMut::from(mat))
         }
 
-        match self.primitive_size().get() {
-            U8_SIZE => view::<u8>(self),
-            U16_SIZE => view::<u16>(self),
-            F32_SIZE => view::<f32>(self),
+        match self.primitive_bit_size().get() {
+            U8_BITS => view::<u8>(self),
+            U16_BITS => view::<u16>(self),
+            F32_BITS => view::<f32>(self),
             _ => Err(unsupported_primitive(self)),
         }
     }
@@ -455,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_channel_with_unsupported_primitive_size_is_rejected() -> TestResult {
+    fn dynamic_channel_with_unsupported_primitive_bit_size_is_rejected() -> TestResult {
         #[derive(Clone, Copy, PartialEq)]
         #[repr(transparent)]
         struct F64(f64);

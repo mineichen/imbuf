@@ -131,9 +131,11 @@ impl IncompatibleChannelError {
 #[non_exhaustive]
 pub struct PixelLayout {
     pub elements: NonZeroU8,
-    /// Size of a single element (primitive) of a pixel
-    pub primitive_size: NonZeroUsize,
-    /// Alignment of the primitive. For a channel, it's the alignment, which every buffer of the
+    /// Size of a single element (primitive) of a pixel in bits. It's a multiple of 8 for all
+    /// primitives, which are currently supported, but allows sub-byte primitives (e.g. 1 bit) in
+    /// the future.
+    pub primitive_bit_size: NonZeroUsize,
+    /// Alignment of the primitive in bytes. For a channel, it's the alignment, which every buffer of the
     /// channel has (see [`ImageChannelVTable::new`](crate::ImageChannelVTable::new)).
     /// A channel can be viewed as a pixel type, if its alignment is at least the one of the pixel
     /// type.
@@ -144,12 +146,12 @@ impl PixelLayout {
     #[must_use]
     pub const fn new(
         elements: NonZeroU8,
-        primitive_size: NonZeroUsize,
+        primitive_bit_size: NonZeroUsize,
         primitive_alignment: NonZeroUsize,
     ) -> Self {
         Self {
             elements,
-            primitive_size,
+            primitive_bit_size,
             primitive_alignment,
         }
     }
@@ -160,18 +162,22 @@ impl PixelLayout {
 
     /// Layout of `pixel_elements` primitives `T` per pixel
     pub(crate) const fn of_primitive<T: PixelTypePrimitive>(pixel_elements: NonZeroU8) -> Self {
-        let primitive_size = const {
-            NonZeroUsize::new(size_of::<T>()).expect("Zero sized primitives are not supported")
+        let primitive_bit_size = const {
+            let bytes =
+                NonZeroUsize::new(size_of::<T>()).expect("Zero sized primitives are not supported");
+            bytes
+                .checked_mul(NonZeroUsize::new(u8::BITS as usize).expect("A byte has 8 bits"))
+                .expect("The size of the primitive in bits overflows usize")
         };
         let primitive_alignment =
             const { NonZeroUsize::new(align_of::<T>()).expect("Alignments are never zero") };
-        Self::new(pixel_elements, primitive_size, primitive_alignment)
+        Self::new(pixel_elements, primitive_bit_size, primitive_alignment)
     }
 
     /// Whether a channel with this layout can be viewed as a pixel type with the `required` layout
     pub(crate) fn fits(self, required: Self) -> bool {
         self.elements == required.elements
-            && self.primitive_size == required.primitive_size
+            && self.primitive_bit_size == required.primitive_bit_size
             && self.primitive_alignment >= required.primitive_alignment
     }
 }
@@ -180,8 +186,8 @@ impl Display for PixelLayout {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "pixel_elements={}, primitive_size={}, primitive_alignment={}",
-            self.elements, self.primitive_size, self.primitive_alignment
+            "pixel_elements={}, primitive_bit_size={}, primitive_alignment={}",
+            self.elements, self.primitive_bit_size, self.primitive_alignment
         )
     }
 }
@@ -208,5 +214,17 @@ impl OverflowBufferLenError {
             pixel_elements,
             channels,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layout_of_primitive_is_in_bits() {
+        let layout = PixelLayout::of_primitive::<u16>(NonZeroU8::MIN);
+        assert_eq!(layout.primitive_bit_size.get(), 16);
+        assert_eq!(layout.primitive_alignment.get(), 2);
     }
 }

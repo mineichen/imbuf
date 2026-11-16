@@ -413,7 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn image_with_other_primitive_size_is_not_uniform() {
+    fn image_with_other_primitive_bit_size_is_not_uniform() {
         let ch1 = const { ImageChannel::new_slice_unwrap(&[1u8], NZ_1, NZ_1) };
         let ch2 = const { ImageChannel::new_slice_unwrap(&[1u16], NZ_1, NZ_1) };
         let dynamic = DynamicImage::from_channels(ch1.into(), [ch2.into()]);
@@ -616,7 +616,7 @@ mod tests {
     fn create_from_rgb8_interleaved() -> TestResult {
         let dynamic = DynamicImage::from(RGB8);
         assert_eq!(1, dynamic.channels.len());
-        assert_eq!(1, dynamic[0].primitive_size().get());
+        assert_eq!(8, dynamic[0].primitive_bit_size().get());
         assert_eq!(3, dynamic[0].pixel_elements().get());
         assert_eq!(Ok([[1u8, 2, 3]].as_slice()), dynamic[0].buffer::<[u8; 3]>());
         let rgb_back: Image<[u8; 3], 1> = dynamic.try_into()?;
@@ -667,12 +667,12 @@ mod tests {
                     IncompatibleImageError::Channel(IncompatibleChannelError {
                         actual: PixelLayout {
                             elements: NonZeroU8::MIN,
-                            primitive_size: NonZeroUsize::MIN,
+                            primitive_bit_size: first_primitive_bit_size,
                             primitive_alignment: NonZeroUsize::MIN
                         },
                         required: Some(PixelLayout {
                             elements: NonZeroU8::MIN,
-                            primitive_size: second_primitive_size,
+                            primitive_bit_size: second_primitive_bit_size,
                             primitive_alignment: second_primitive_alignment
                         }),
                         target_pixel_type: "u16",
@@ -680,7 +680,8 @@ mod tests {
                     }),
                 ..
             }) if image == DynamicImage::from(LUMA8)
-                && second_primitive_size.get() == 2
+                && first_primitive_bit_size.get() == 8
+                && second_primitive_bit_size.get() == 16
                 && second_primitive_alignment.get() == 2
         );
     }
@@ -693,16 +694,16 @@ mod tests {
             Err(IncompatibleImageError::Channel(IncompatibleChannelError {
                 actual: PixelLayout {
                     elements: NZ_U8_3,
-                    primitive_size: first_primitive_size,
+                    primitive_bit_size: first_primitive_bit_size,
                     primitive_alignment: NonZeroUsize::MIN
                 },
                 required: Some(PixelLayout {
                     elements: NonZeroU8::MIN,
-                    primitive_size: NonZeroUsize::MIN,
+                    primitive_bit_size: second_primitive_bit_size,
                             primitive_alignment: NonZeroUsize::MIN
                 }),
                 target_pixel_type: "u8",
-            })) if first_primitive_size.get() == 1
+            })) if first_primitive_bit_size.get() == 8 && second_primitive_bit_size.get() == 8
         );
     }
 }

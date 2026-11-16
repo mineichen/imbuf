@@ -125,10 +125,12 @@ pub struct ImageChannelVTable {
     /// `make_mut` without copying, see [`ImageChannelVTable::new`]
     pub(crate) try_make_mut: unsafe extern "C-unwind" fn(&mut DynamicImageChannelView<'_>) -> bool,
     pub(crate) drop: unsafe extern "C-unwind" fn(&mut DynamicImageChannelView<'_>),
-    /// Size of the primitive of the channel in bytes. It's the same for the entire lifetime of the
-    /// channel and for channels created by `clone` and `make_mut`. It receives the channel, so
-    /// storages with a runtime primitive type could use a single vtable (not public yet).
-    pub(crate) primitive_size:
+    /// Size of the primitive of the channel in bits, so sub-byte primitives (e.g. 1 bit) can be
+    /// supported in the future. Currently, it's always a multiple of 8. It's the same for the
+    /// entire lifetime of the channel and for channels created by `clone` and `make_mut`. It
+    /// receives the channel, so storages with a runtime primitive type could use a single vtable
+    /// (not public yet).
+    pub(crate) primitive_bit_size:
         unsafe extern "C-unwind" fn(&DynamicImageChannelView<'_>) -> NonZeroUsize,
     /// Alignment, which every buffer of the channel is guaranteed to have, as a power of two.
     /// It's the same for the entire lifetime of the channel, and channels created by `clone` and
@@ -199,18 +201,18 @@ impl ImageChannelVTable {
             make_mut,
             try_make_mut,
             drop,
-            primitive_size: primitive_size::<T>,
+            primitive_bit_size: primitive_bit_size::<T>,
             primitive_alignment: primitive_alignment::<T>,
             type_hint: T::TYPE_HINT,
         }
     }
 }
 
-/// `primitive_size` of [`ImageChannelVTable::new`] for the primitive `T`
-unsafe extern "C-unwind" fn primitive_size<T: PixelTypePrimitive>(
+/// `primitive_bit_size` of [`ImageChannelVTable::new`] for the primitive `T`
+unsafe extern "C-unwind" fn primitive_bit_size<T: PixelTypePrimitive>(
     _: &DynamicImageChannelView<'_>,
 ) -> NonZeroUsize {
-    const { PixelLayout::of_primitive::<T>(NonZeroU8::MIN).primitive_size }
+    const { PixelLayout::of_primitive::<T>(NonZeroU8::MIN).primitive_bit_size }
 }
 
 /// `primitive_alignment` of [`ImageChannelVTable::new`] for the primitive `T`

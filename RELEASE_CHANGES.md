@@ -42,8 +42,8 @@ Pending changes for the upcoming releases of the unreleased `imbuf-image` /
 - `into_imbuf_dynamic`/`into_imbuf_specific` reject `Mat`s, whose data isn't aligned for their
   depth (only possible for `Mat`s over external data), as imbuf requires aligned buffers.
 - Add `ImbufAsOpencv` / `ImbufAsOpencvMut` for `imbuf::DynamicImageChannel`.
-  Its depth is derived from the primitive size (1 byte: `CV_8U`, 2 bytes:
-  `CV_16U`, 4 bytes: `CV_32F`).
+  Its depth is derived from the primitive size (8 bits: `CV_8U`, 16 bits:
+  `CV_16U`, 32 bits: `CV_32F`).
 - Check the layout of `cv::Mat` and `cv::UMatData` before reading their mirrored fields, and
   load the reference counts atomically with acquire ordering. Only `OpenCV` 4 is supported
   (checked at compile time). If the mirrored fields don't match their accessors, it panics.

@@ -45,7 +45,7 @@ use crate::{
 /// the fields back into a channel.
 #[repr(C)]
 pub struct DynamicImageChannelView<'a> {
-    /// Pointer to the buffer, which is `len_flat()` primitives of `primitive_size()` bytes long
+    /// Pointer to the buffer, which is `len_flat()` primitives of `primitive_bit_size()` bits long
     ptr: *const u8,
     width: NonZeroU32,
     height: NonZeroU32,
@@ -66,11 +66,12 @@ impl<'a> DynamicImageChannelView<'a> {
     ///
     /// # Safety
     /// The following invariants have to hold:
-    /// - The size of the buffer in bytes (`width * height * pixel_elements * size_of::<T>()`)
-    ///   doesn't exceed `isize::MAX` (like any slice), and the multiplications to calculate it
+    /// - The size of the buffer in bytes (`width * height * pixel_elements` primitives of the
+    ///   `primitive_bit_size` of the vtable, rounded up to whole bytes, e.g. 2 bytes for 10
+    ///   primitives of 1 bit) doesn't exceed `isize::MAX` (like any slice), and the multiplications to calculate it
     ///   don't overflow, which implies that `width * height * pixel_elements` matches the buffer
-    ///   length. [`DynamicImageChannelView::ensure_valid_flat_len`] checks the length, e.g. for
-    ///   untrusted input.
+    ///   length. [`DynamicImageChannelView::ensure_valid_flat_len`] checks the length and
+    ///   [`DynamicImageChannelView::ensure_valid_bit_len`] the size, e.g. for untrusted input.
     /// - `ptr` is aligned for `T`.
     /// - `ptr` points to an initialized buffer of that size, which stays valid until the `drop`
     ///   function of the vtable is called and at least for `'a`. The buffer can be shared between
@@ -110,7 +111,7 @@ impl<'a> DynamicImageChannelView<'a> {
         });
         debug_assert_eq!(
             Ok(()),
-            Self::ensure_valid_byte_len(width, height, pixel_elements, channel.primitive_size()),
+            Self::ensure_valid_bit_len(width, height, pixel_elements, channel.primitive_bit_size()),
             "The buffer size of the raw parts exceeds isize::MAX"
         );
         debug_assert!(
@@ -200,11 +201,19 @@ impl<'a> DynamicImageChannelView<'a> {
         self.pixel_elements
     }
 
-    /// Size of a single primitive in bytes
+    /// Size of a single primitive in bits
     #[must_use]
-    pub fn primitive_size(&self) -> NonZeroUsize {
+    pub fn primitive_bit_size(&self) -> NonZeroUsize {
         // Safety: The vtable is able to work with the channel
-        unsafe { (self.vtable.primitive_size)(self) }
+        unsafe { (self.vtable.primitive_bit_size)(self) }
+    }
+
+    /// Length of the buffer in bytes: `len_flat() * primitive_bit_size()` bits, rounded up to
+    /// whole bytes (e.g. 2 bytes for 10 primitives of 1 bit)
+    // Fits `usize`, as the buffer size doesn't exceed `isize::MAX` (invariant of the channel)
+    #[allow(clippy::cast_possible_truncation)]
+    fn flat_byte_len(&self) -> usize {
+        Self::byte_len_of_bits(self.len_flat(), self.primitive_bit_size()) as usize
     }
 
     /// Alignment in bytes, which every buffer of the channel is aligned to
@@ -254,12 +263,12 @@ impl<'a> DynamicImageChannelView<'a> {
         );
     }
 
-    /// `pixel_elements`, `primitive_size` and `primitive_alignment` of the channel
+    /// `pixel_elements`, `primitive_bit_size` and `primitive_alignment` of the channel
     #[must_use]
     pub fn pixel_layout(&self) -> PixelLayout {
         PixelLayout::new(
             self.pixel_elements,
-            self.primitive_size(),
+            self.primitive_bit_size(),
             self.primitive_alignment(),
         )
     }
@@ -418,7 +427,7 @@ impl<'a> DynamicImageChannelView<'a> {
 
     #[must_use]
     pub fn buffer_flat_bytes(&self) -> &[u8] {
-        let len = self.len_flat() * self.primitive_size().get();
+        let len = self.flat_byte_len();
         // Safety: The buffer is initialized (invariant of the channel)
         unsafe { slice::from_raw_parts(self.ptr, len) }
     }
@@ -531,25 +540,35 @@ impl<'a> DynamicImageChannelView<'a> {
         }
     }
 
-    /// Checks that the size of the buffer in bytes (`width * height * pixel_elements *
-    /// primitive_size`) doesn't exceed `isize::MAX`, which [`DynamicImageChannelView::from_raw_parts`]
-    /// requires
-    fn ensure_valid_byte_len(
+    /// Checks that `width * height * pixel_elements` doesn't overflow `usize` and that the size
+    /// of the buffer (`width * height * pixel_elements * primitive_bit_size` bits, rounded up to
+    /// whole bytes) doesn't exceed `isize::MAX` bytes, which
+    /// [`DynamicImageChannelView::from_raw_parts`] requires. Use it with
+    /// [`DynamicImageChannelView::ensure_valid_flat_len`] to validate untrusted dimensions.
+    pub const fn ensure_valid_bit_len(
         width: NonZeroU32,
         height: NonZeroU32,
         pixel_elements: NonZeroU8,
-        primitive_size: NonZeroUsize,
+        primitive_bit_size: NonZeroUsize,
     ) -> Result<(), OverflowBufferLenError> {
-        let len = Self::flat_len_checked(width, height, pixel_elements, NonZeroU8::MIN)?;
-        len.checked_mul(primitive_size.get())
-            .filter(|&bytes| bytes <= isize::MAX.unsigned_abs())
-            .map(drop)
-            .ok_or(OverflowBufferLenError::new(
-                width,
-                height,
-                pixel_elements,
-                NonZeroU8::MIN,
-            ))
+        let overflow = OverflowBufferLenError::new(width, height, pixel_elements, NonZeroU8::MIN);
+        let Ok(len) = Self::flat_len_checked(width, height, pixel_elements, NonZeroU8::MIN) else {
+            return Err(overflow);
+        };
+        if Self::byte_len_of_bits(len, primitive_bit_size) <= isize::MAX.unsigned_abs() as u128 {
+            Ok(())
+        } else {
+            Err(overflow)
+        }
+    }
+
+    /// Size of `len` primitives of `primitive_bit_size` bits in bytes, rounded up to whole bytes
+    ///
+    /// The calculation is done in `u128`, so it can't overflow, as both factors fit `u64` (see
+    /// the assertion after this `impl`).
+    const fn byte_len_of_bits(len: usize, primitive_bit_size: NonZeroUsize) -> u128 {
+        let bits = (len as u128) * (primitive_bit_size.get() as u128);
+        bits.div_ceil(u8::BITS as u128)
     }
 
     /// `width * height * pixel_elements * channels` as `usize`
@@ -606,12 +625,13 @@ impl Clone for DynamicImageChannelView<'_> {
     }
 }
 
-/// Channels are equal, if their dimensions, `pixel_elements`, `primitive_size` and bytes are equal
+/// Channels are equal, if their dimensions, `pixel_elements`, `primitive_bit_size` and bytes are
+/// equal
 impl PartialEq for DynamicImageChannelView<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.dimensions() == other.dimensions()
             && self.pixel_elements() == other.pixel_elements()
-            && self.primitive_size() == other.primitive_size()
+            && self.primitive_bit_size() == other.primitive_bit_size()
             && self.buffer_flat_bytes() == other.buffer_flat_bytes()
     }
 }
@@ -621,7 +641,7 @@ impl Debug for DynamicImageChannelView<'_> {
         f.debug_struct("DynamicImageChannel")
             .field("width", &self.width())
             .field("height", &self.height())
-            .field("primitive_size", &self.primitive_size())
+            .field("primitive_bit_size", &self.primitive_bit_size())
             .field("type_hint", &self.type_hint())
             .field("pixel_elements", &self.pixel_elements())
             .finish()
@@ -675,6 +695,55 @@ mod tests {
                 NonZeroU8::MIN,
             )))
         );
+    }
+
+    #[test]
+    fn ensure_valid_bit_len() -> TestResult {
+        let bits = |bits| NonZeroUsize::new(bits).ok_or("zero");
+        assert_eq!(
+            DynamicImageChannelView::ensure_valid_bit_len(NZ_2, NZ_3, NZ_U8_2, bits(16)?),
+            Ok(())
+        );
+        assert_eq!(
+            DynamicImageChannelView::ensure_valid_bit_len(NZ_2, NZ_3, NZ_U8_2, bits(1)?),
+            Ok(())
+        );
+        // The flat length fits a 64-bit `usize`, but its size in bytes exceeds `isize::MAX` (on
+        // smaller targets, the flat length overflows already)
+        assert_eq!(
+            DynamicImageChannelView::ensure_valid_bit_len(
+                NonZeroU32::MAX,
+                NonZeroU32::MAX,
+                NonZeroU8::MIN,
+                bits(8)?
+            ),
+            Err(OverflowBufferLenError::new(
+                NonZeroU32::MAX,
+                NonZeroU32::MAX,
+                NonZeroU8::MIN,
+                NonZeroU8::MIN,
+            ))
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn ensure_valid_bit_len_limits_bytes_to_isize_max() -> TestResult {
+        // 2^63 - 2^31 primitives, so 8 bits fit `isize::MAX` bytes, but 9 bits don't
+        let width = NonZeroU32::new(1 << 31).ok_or("zero")?;
+        let bits = |bits| NonZeroUsize::new(bits).ok_or("zero");
+        let check = |bit_size| {
+            DynamicImageChannelView::ensure_valid_bit_len(
+                width,
+                NonZeroU32::MAX,
+                NonZeroU8::MIN,
+                bit_size,
+            )
+        };
+        assert_eq!(check(bits(8)?), Ok(()));
+        assert_matches!(check(bits(9)?), Err(_));
+        Ok(())
     }
 
     #[test]
@@ -752,9 +821,29 @@ mod tests {
     }
 
     #[test]
-    fn buffer_flat_checks_primitive_size() -> TestResult {
+    fn byte_len_of_bits_rounds_up_to_whole_bytes() -> TestResult {
+        let bits = |bits| NonZeroUsize::new(bits).ok_or("zero");
+        let byte_len = DynamicImageChannelView::byte_len_of_bits;
+        assert_eq!(byte_len(10, bits(1)?), 2);
+        assert_eq!(byte_len(8, bits(1)?), 1);
+        assert_eq!(byte_len(3, bits(12)?), 5);
+        assert_eq!(byte_len(3, bits(16)?), 6);
+        assert_eq!(byte_len(19, bits(12)?), 29);
+        // `len * bits` overflows `usize`, but not `u128`
+        let max = usize::MAX as u128;
+        assert_eq!(byte_len(usize::MAX, bits(8)?), max);
+        assert_eq!(byte_len(usize::MAX, bits(1)?), max.div_ceil(8));
+        assert_eq!(
+            byte_len(usize::MAX, bits(usize::MAX)?),
+            (max * max).div_ceil(8)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn buffer_flat_checks_primitive_bit_size() -> TestResult {
         let channel = DynamicImageChannel::new_vec(vec![[1u16, 2]], NZ_1, NZ_1)?;
-        assert_eq!(channel.primitive_size().get(), 2);
+        assert_eq!(channel.primitive_bit_size().get(), 16);
         assert_eq!(channel.len_flat(), 2);
         assert_eq!(channel.buffer_flat::<u16>(), Ok(&[1, 2][..]));
         assert_matches!(channel.buffer_flat::<u8>(), Err(_));

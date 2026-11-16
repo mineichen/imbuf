@@ -7,11 +7,11 @@ use imbuf::{
 
 use crate::ref_image::{DynamicRefImage, DynamicRefImageMut};
 
-/// Primitive sizes of the `image` formats. An `imbuf::DynamicImageChannel` only knows the size of
-/// its primitive, so e.g. a primitive of 4 bytes is interpreted as `f32`.
-const U8_SIZE: usize = size_of::<u8>();
-const U16_SIZE: usize = size_of::<u16>();
-const F32_SIZE: usize = size_of::<f32>();
+/// Primitive sizes of the `image` formats in bits. An `imbuf::DynamicImageChannel` only knows the
+/// size of its primitive, so e.g. a primitive of 32 bits is interpreted as `f32`.
+const U8_BITS: usize = u8::BITS as usize;
+const U16_BITS: usize = u16::BITS as usize;
+const F32_BITS: usize = size_of::<f32>() * U8_BITS;
 /// Primitives of the `image` formats, reported as `target_pixel_type` of unsupported layouts
 const SUPPORTED_PRIMITIVES: &str = "u8|u16|f32";
 
@@ -93,35 +93,35 @@ impl<'a> TryFrom<&'a imbuf::DynamicImage> for DynamicRefImage<'a> {
         let channel = value.first();
 
         match (
-            channel.primitive_size().get(),
+            channel.primitive_bit_size().get(),
             channel.pixel_elements().get(),
         ) {
-            (U8_SIZE, 1) => Ok(DynRefImg::ImageLuma8(ref_image(channel.try_cast::<u8>()?))),
-            (U8_SIZE, 2) => Ok(DynRefImg::ImageLumaA8(ref_image(
+            (U8_BITS, 1) => Ok(DynRefImg::ImageLuma8(ref_image(channel.try_cast::<u8>()?))),
+            (U8_BITS, 2) => Ok(DynRefImg::ImageLumaA8(ref_image(
                 channel.try_cast::<[u8; 2]>()?,
             ))),
-            (U8_SIZE, 3) => Ok(DynRefImg::ImageRgb8(ref_image(
+            (U8_BITS, 3) => Ok(DynRefImg::ImageRgb8(ref_image(
                 channel.try_cast::<[u8; 3]>()?,
             ))),
-            (U8_SIZE, 4) => Ok(DynRefImg::ImageRgba8(ref_image(
+            (U8_BITS, 4) => Ok(DynRefImg::ImageRgba8(ref_image(
                 channel.try_cast::<[u8; 4]>()?,
             ))),
-            (U16_SIZE, 1) => Ok(DynRefImg::ImageLuma16(ref_image(
+            (U16_BITS, 1) => Ok(DynRefImg::ImageLuma16(ref_image(
                 channel.try_cast::<u16>()?,
             ))),
-            (U16_SIZE, 2) => Ok(DynRefImg::ImageLumaA16(ref_image(
+            (U16_BITS, 2) => Ok(DynRefImg::ImageLumaA16(ref_image(
                 channel.try_cast::<[u16; 2]>()?,
             ))),
-            (U16_SIZE, 3) => Ok(DynRefImg::ImageRgb16(ref_image(
+            (U16_BITS, 3) => Ok(DynRefImg::ImageRgb16(ref_image(
                 channel.try_cast::<[u16; 3]>()?,
             ))),
-            (U16_SIZE, 4) => Ok(DynRefImg::ImageRgba16(ref_image(
+            (U16_BITS, 4) => Ok(DynRefImg::ImageRgba16(ref_image(
                 channel.try_cast::<[u16; 4]>()?,
             ))),
-            (F32_SIZE, 3) => Ok(DynRefImg::ImageRgb32F(ref_image(
+            (F32_BITS, 3) => Ok(DynRefImg::ImageRgb32F(ref_image(
                 channel.try_cast::<[f32; 3]>()?,
             ))),
-            (F32_SIZE, 4) => Ok(DynRefImg::ImageRgba32F(ref_image(
+            (F32_BITS, 4) => Ok(DynRefImg::ImageRgba32F(ref_image(
                 channel.try_cast::<[f32; 4]>()?,
             ))),
             _ => Err(unsupported_layout(channel.pixel_layout())),
@@ -160,37 +160,37 @@ impl<'a> TryFrom<&'a mut imbuf::DynamicImage> for DynamicRefImageMut<'a> {
         let channel = &mut value[0];
 
         match (
-            channel.primitive_size().get(),
+            channel.primitive_bit_size().get(),
             channel.pixel_elements().get(),
         ) {
-            (U8_SIZE, 1) => Ok(DynRefImgMut::ImageLuma8(ref_image_mut(
+            (U8_BITS, 1) => Ok(DynRefImgMut::ImageLuma8(ref_image_mut(
                 channel.try_cast_mut::<u8>()?,
             ))),
-            (U8_SIZE, 2) => Ok(DynRefImgMut::ImageLumaA8(ref_image_mut(
+            (U8_BITS, 2) => Ok(DynRefImgMut::ImageLumaA8(ref_image_mut(
                 channel.try_cast_mut::<[u8; 2]>()?,
             ))),
-            (U8_SIZE, 3) => Ok(DynRefImgMut::ImageRgb8(ref_image_mut(
+            (U8_BITS, 3) => Ok(DynRefImgMut::ImageRgb8(ref_image_mut(
                 channel.try_cast_mut::<[u8; 3]>()?,
             ))),
-            (U8_SIZE, 4) => Ok(DynRefImgMut::ImageRgba8(ref_image_mut(
+            (U8_BITS, 4) => Ok(DynRefImgMut::ImageRgba8(ref_image_mut(
                 channel.try_cast_mut::<[u8; 4]>()?,
             ))),
-            (U16_SIZE, 1) => Ok(DynRefImgMut::ImageLuma16(ref_image_mut(
+            (U16_BITS, 1) => Ok(DynRefImgMut::ImageLuma16(ref_image_mut(
                 channel.try_cast_mut::<u16>()?,
             ))),
-            (U16_SIZE, 2) => Ok(DynRefImgMut::ImageLumaA16(ref_image_mut(
+            (U16_BITS, 2) => Ok(DynRefImgMut::ImageLumaA16(ref_image_mut(
                 channel.try_cast_mut::<[u16; 2]>()?,
             ))),
-            (U16_SIZE, 3) => Ok(DynRefImgMut::ImageRgb16(ref_image_mut(
+            (U16_BITS, 3) => Ok(DynRefImgMut::ImageRgb16(ref_image_mut(
                 channel.try_cast_mut::<[u16; 3]>()?,
             ))),
-            (U16_SIZE, 4) => Ok(DynRefImgMut::ImageRgba16(ref_image_mut(
+            (U16_BITS, 4) => Ok(DynRefImgMut::ImageRgba16(ref_image_mut(
                 channel.try_cast_mut::<[u16; 4]>()?,
             ))),
-            (F32_SIZE, 3) => Ok(DynRefImgMut::ImageRgb32F(ref_image_mut(
+            (F32_BITS, 3) => Ok(DynRefImgMut::ImageRgb32F(ref_image_mut(
                 channel.try_cast_mut::<[f32; 3]>()?,
             ))),
-            (F32_SIZE, 4) => Ok(DynRefImgMut::ImageRgba32F(ref_image_mut(
+            (F32_BITS, 4) => Ok(DynRefImgMut::ImageRgba32F(ref_image_mut(
                 channel.try_cast_mut::<[f32; 4]>()?,
             ))),
             _ => Err(unsupported_layout(channel.pixel_layout())),
@@ -278,19 +278,19 @@ impl ImbufIntoImage for imbuf::DynamicImage {
         self.ensure_single_channel()?;
         let channel = self.first();
         match (
-            channel.primitive_size().get(),
+            channel.primitive_bit_size().get(),
             channel.pixel_elements().get(),
         ) {
-            (U8_SIZE, 1) => convert::<u8>(self),
-            (U8_SIZE, 2) => convert::<[u8; 2]>(self),
-            (U8_SIZE, 3) => convert::<[u8; 3]>(self),
-            (U8_SIZE, 4) => convert::<[u8; 4]>(self),
-            (U16_SIZE, 1) => convert::<u16>(self),
-            (U16_SIZE, 2) => convert::<[u16; 2]>(self),
-            (U16_SIZE, 3) => convert::<[u16; 3]>(self),
-            (U16_SIZE, 4) => convert::<[u16; 4]>(self),
-            (F32_SIZE, 3) => convert::<[f32; 3]>(self),
-            (F32_SIZE, 4) => convert::<[f32; 4]>(self),
+            (U8_BITS, 1) => convert::<u8>(self),
+            (U8_BITS, 2) => convert::<[u8; 2]>(self),
+            (U8_BITS, 3) => convert::<[u8; 3]>(self),
+            (U8_BITS, 4) => convert::<[u8; 4]>(self),
+            (U16_BITS, 1) => convert::<u16>(self),
+            (U16_BITS, 2) => convert::<[u16; 2]>(self),
+            (U16_BITS, 3) => convert::<[u16; 3]>(self),
+            (U16_BITS, 4) => convert::<[u16; 4]>(self),
+            (F32_BITS, 3) => convert::<[f32; 3]>(self),
+            (F32_BITS, 4) => convert::<[f32; 4]>(self),
             _ => Err(unsupported_layout(channel.pixel_layout())),
         }
     }
@@ -308,10 +308,12 @@ fn color_layout(color: image::ColorType) -> PixelLayout {
     let pixel_elements = NonZeroU8::new(color.channel_count()).unwrap_or(NonZeroU8::MIN);
     // `image` has no color with mixed primitive sizes. Its primitives (`u8`, `u16`, `f32`) are
     // aligned to their size
-    let primitive_size =
+    let primitive_byte_size =
         NonZeroU8::new(color.bytes_per_pixel() / pixel_elements).unwrap_or(NonZeroU8::MIN);
-    let primitive_size = NonZeroUsize::from(primitive_size);
-    PixelLayout::new(pixel_elements, primitive_size, primitive_size)
+    let primitive_byte_size = NonZeroUsize::from(primitive_byte_size);
+    let primitive_bit_size =
+        primitive_byte_size.saturating_mul(NonZeroUsize::new(U8_BITS).expect("A byte has 8 bits"));
+    PixelLayout::new(pixel_elements, primitive_bit_size, primitive_byte_size)
 }
 
 fn image_from_raw<P, T>(width: u32, height: u32, buffer: Vec<T>) -> ImageBuffer<P, Vec<T>>
@@ -458,9 +460,10 @@ mod tests {
         let image = Image::<f32, 1>::new_vec(vec![1.], NZ_1, NZ_1)?;
         let mut dynamic = imbuf::DynamicImage::from(image);
 
-        let four = NonZeroUsize::new(4).ok_or("zero")?;
+        let bits = NonZeroUsize::new(32).ok_or("zero")?;
+        let alignment = NonZeroUsize::new(4).ok_or("zero")?;
         let expected = IncompatibleImageError::Channel(IncompatibleChannelError::new(
-            PixelLayout::new(NonZeroU8::MIN, four, four),
+            PixelLayout::new(NonZeroU8::MIN, bits, alignment),
             None,
             SUPPORTED_PRIMITIVES,
         ));
